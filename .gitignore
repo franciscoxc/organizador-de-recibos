@@ -1,0 +1,7 @@
+.DS_Store
+bin/
+obj/
+publish/
+*.user
+# Recibos reales: datos personales, nunca al git.
+/*.pdf

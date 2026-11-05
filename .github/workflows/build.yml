@@ -1,0 +1,46 @@
+# En cada push: pruebas y los dos .exe en Windows.
+# Con un tag v* (por ejemplo v1.0.0) además publica el release con RELEASE_NOTES_<tag>.md y los SHA-256.
+# La prueba con recibos reales se saltea sola acá: los PDF no están en el git.
+name: build
+
+on: push
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Pruebas
+        run: dotnet test tests
+
+      - name: Compilar x64 y ARM64
+        working-directory: app
+        run: |
+          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-x64 -o publish/win-x64
+          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-arm64 -o publish/win-arm64
+          Copy-Item "publish/win-x64/Organizador de Recibos.exe" ../Organizador.de.Recibos.x64.exe
+          Copy-Item "publish/win-arm64/Organizador de Recibos.exe" ../Organizador.de.Recibos.arm.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: organizador-de-recibos
+          path: Organizador.de.Recibos.*.exe
+
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $sums = Get-ChildItem Organizador.de.Recibos.*.exe | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+          $notes = (Get-Content "RELEASE_NOTES_$env:TAG.md" -Raw) + "`n## SHA-256`n`n" + '```text' + "`n" + ($sums -join "`n") + "`n" + '```' + "`n"
+          Set-Content notes.md $notes
+          gh release create $env:TAG Organizador.de.Recibos.x64.exe Organizador.de.Recibos.arm.exe --title "Organizador de Recibos $env:TAG" --notes-file notes.md
