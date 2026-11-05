@@ -1,6 +1,6 @@
 # Organizador de Recibos
 
-**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.0.0/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.0.0/Organizador.de.Recibos.arm.exe)
+**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.0.1/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.0.1/Organizador.de.Recibos.arm.exe)
 
 Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
@@ -10,8 +10,8 @@ mes, con las iniciales del empleado sobre la firma.
 
 - Un PDF por empleado y mes, con el nombre `APELLIDO NOMBRE MM AAAA.pdf`
   (por ejemplo `PEREZ JUAN 07 2026.pdf`).
-- Las iniciales del empleado en letra cursiva sobre «FIRMA DEL EMPLEADO»
-  (por ejemplo `P.J.`).
+- Las iniciales del empleado sobre «FIRMA DEL EMPLEADO» (por ejemplo `P.J.`),
+  en negro y con Segoe Print, la letra manuscrita que trae Windows.
 - Todo dentro de una carpeta con el nombre del empleador, al lado de los PDF
   originales.
 
@@ -43,8 +43,9 @@ Con .NET 10 en Windows: `app/build-windows.bat`. Las pruebas: `dotnet test tests
 ## Componentes de terceros
 
 - [PdfPig](https://github.com/UglyToad/PdfPig), licencia Apache 2.0.
-- La fuente Parisienne, licencia SIL Open Font License; el texto está en
-  `app/Parisienne-OFL.txt`.
+- La fuente Parisienne, licencia SIL Open Font License (el texto está en
+  `app/Parisienne-OFL.txt`). Se usa solo si la PC no tiene Segoe Print, que
+  viene con Windows y la app toma de la PC sin incluirla.
 
 ## Soporte
 

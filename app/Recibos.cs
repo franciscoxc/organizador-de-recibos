@@ -126,7 +126,7 @@ public static class Recibos
             foreach (var ((carpeta, empleador, nombre, mes, anio), hojas) in grupos)
             {
                 var builder = new PdfDocumentBuilder();
-                var fuente = builder.AddTrueTypeFont(Cursiva.Value);
+                var fuente = builder.AddTrueTypeFont(Manuscrita.Value);
                 foreach (var (doc, n, firma) in hojas)
                 {
                     var p = builder.AddPage(doc, n);
@@ -148,9 +148,12 @@ public static class Recibos
         return creados;
     }
 
-    // Parisienne (licencia OFL), embebida en el .exe: imita letra manuscrita y se lee clara.
-    static readonly Lazy<byte[]> Cursiva = new(() =>
+    // Segoe Print, la letra manuscrita que trae Windows: se toma de la PC y no viaja en el .exe,
+    // porque es de Microsoft. Si faltara, queda la Parisienne embebida (licencia OFL).
+    static readonly Lazy<byte[]> Manuscrita = new(() =>
     {
+        var segoe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "segoepr.ttf");
+        if (File.Exists(segoe)) return File.ReadAllBytes(segoe);
         using var s = typeof(Recibos).Assembly.GetManifestResourceStream("Parisienne-Regular.ttf")!;
         using var m = new MemoryStream();
         s.CopyTo(m);
@@ -159,12 +162,14 @@ public static class Recibos
 
     static void Estampar(PdfPageBuilder p, PdfDocumentBuilder.AddedFont fuente, Palabra firma, string texto)
     {
-        const double tam = 20;
+        const double tam = 16;
         var letras = p.MeasureText(texto, tam, new PdfPoint(0, 0), fuente);
         var ancho = letras.Count == 0 ? 0 : letras[^1].EndBaseLine.X - letras[0].StartBaseLine.X;
         // Línea base apenas encima de la raya de firma, que está unos 8 pt sobre el rótulo.
         var punto = new PdfPoint((firma.Izq + firma.Der - ancho) / 2, firma.Arriba + 12);
-        p.SetTextAndFillColor(0, 0, 140);
+        // Negro explícito: el texto va después del contenido de la página copiada y no debe depender
+        // del color en que ese contenido haya terminado.
+        p.SetTextAndFillColor(0, 0, 0);
         p.AddText(texto, tam, punto, fuente);
         p.ResetColor();
     }
