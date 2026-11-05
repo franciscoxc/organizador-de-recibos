@@ -1,5 +1,8 @@
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Content;
+using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Writer;
 using Xunit;
 
 // Nombres inventados: el repo es público y los recibos reales tienen datos personales.
@@ -18,6 +21,20 @@ public class RecibosTests
         Assert.Equal("GOMEZ LUCIA 07 2026.pdf", Recibos.NombreArchivo("GOMEZ, LUCIA", 7, "2026"));
     }
 
+    // Caveat es el respaldo si la PC no tiene Segoe Print: PdfPig tiene que poder incrustarla.
+    [Fact]
+    public void La_letra_de_respaldo_se_puede_usar()
+    {
+        using var s = typeof(Recibos).Assembly.GetManifestResourceStream("Caveat-Regular.ttf")!;
+        using var m = new MemoryStream();
+        s.CopyTo(m);
+        var b = new PdfDocumentBuilder();
+        var fuente = b.AddTrueTypeFont(m.ToArray());
+        b.AddPage(PageSize.A4).AddText("P.J.C.", 16, new PdfPoint(100, 100), fuente);
+        using var doc = PdfDocument.Open(b.Build());
+        Assert.Contains("P.J.C.", doc.GetPage(1).Text);
+    }
+
     // Los recibos reales están en la carpeta del proyecto y no van al git (son datos personales).
     // Sin ellos (en CI, por ejemplo) la prueba no tiene con qué correr y pasa vacía.
     [Fact]
@@ -32,18 +49,19 @@ public class RecibosTests
         var creados = await Recibos.Procesar(pdfs, null, avisos.Add, salida);
 
         Assert.DoesNotContain(avisos, a => a.StartsWith('⚠'));
-        var esperado = pdfs.Sum(p => { using var d = PdfDocument.Open(p); return d.NumberOfPages; });
-        Assert.Equal(esperado, creados.Count);
+        // Ninguna hoja se pierde ni se repite: un recibo puede ocupar más de una hoja.
+        static int Hojas(string p) { using var d = PdfDocument.Open(p); return d.NumberOfPages; }
+        Assert.Equal(pdfs.Sum(Hojas), creados.Sum(Hojas));
 
-        // Cada archivo dentro de la carpeta de un empleador, con «NOMBRE MM AAAA.pdf» y sus iniciales impresas.
+        // Cada archivo dentro de la carpeta de un empleador, con «NOMBRE MM AAAA.pdf» y sus iniciales en cada hoja.
         foreach (var ruta in creados)
         {
             Assert.Equal(salida, Path.GetDirectoryName(Path.GetDirectoryName(ruta)));
             var m = Regex.Match(Path.GetFileName(ruta), @"^(.+) (\d{2}) (\d{4})\.pdf$");
             Assert.True(m.Success, ruta);
             using var doc = PdfDocument.Open(ruta);
-            var texto = string.Join(" ", doc.GetPages().SelectMany(p => p.GetWords()).Select(w => w.Text));
-            Assert.Contains(Recibos.Iniciales(m.Groups[1].Value), texto);
+            foreach (var hoja in doc.GetPages())
+                Assert.Contains(Recibos.Iniciales(m.Groups[1].Value), string.Join(" ", hoja.GetWords().Select(w => w.Text)));
         }
         Directory.Delete(salida, true);
     }

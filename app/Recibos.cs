@@ -40,34 +40,50 @@ public static class Recibos
 
     static bool Igual(string a, string b) => string.Equals(a.Trim(':', '.'), b, StringComparison.OrdinalIgnoreCase);
 
-    // Cada hoja trae original y duplicado lado a lado: los datos se leen de la mitad izquierda.
+    // Sirve para los dos formatos conocidos: hoja apaisada con original y duplicado lado a lado (se lee
+    // la copia de la izquierda) y hoja vertical con una sola copia, a veces en dos hojas.
     public static Hoja LeerHoja(IReadOnlyList<Palabra> ws, double ancho)
     {
         var mitad = ancho / 2;
-        Palabra? Izquierdo(string rotulo) => Buscar(ws, rotulo).Where(r => r.Izq < mitad).OrderBy(r => r.Izq).FirstOrDefault();
+        Palabra? Primero(string rotulo) => Buscar(ws, rotulo).OrderBy(r => r.Izq).FirstOrDefault();
 
-        var rn = Izquierdo("APELLIDO Y NOMBRE") ?? throw new FormatException("no encontré el rótulo APELLIDO Y NOMBRE");
-        // El nombre ocupa la celda entre el borde y la columna CUIL.
-        var xFin = Izquierdo("CUIL")?.Izq - 5 ?? mitad - 150;
-        // El CUIL está alineado a la derecha y se mete en la celda del nombre: sin dígitos, afuera.
-        var nombre = Unir(ws.Where(w => w.CentroY < rn.Abajo && w.CentroY > rn.Abajo - 18 && w.Izq > rn.Izq - 100 && w.Izq < xFin
-                                        && !w.Texto.Any(char.IsDigit)));
+        var rn = Primero("APELLIDO Y NOMBRE") ?? throw new FormatException("no encontré el rótulo APELLIDO Y NOMBRE");
+        var nombre = ValorDebajo(ws, rn);
 
-        // El empleador es la primera línea de la hoja, a la izquierda del CUIT.
+        // El empleador es la primera línea de la hoja, a la izquierda del CUIT (si está en esa línea).
         var izquierda = ws.Where(w => w.Izq < mitad).ToList();
         var tope = izquierda.Count > 0 ? izquierda.Max(w => w.Arriba) : 0;
-        var xCuit = Izquierdo("CUIT")?.Izq ?? mitad;
+        var xCuit = Primero("CUIT")?.Izq ?? mitad;
         var empleador = Unir(izquierda.Where(w => w.Arriba > tope - 8 && w.Der < xCuit));
 
         var m = Periodo.Match(string.Join(" ", ws.Select(w => w.Texto)));
         if (nombre.Length == 0 || !m.Success) throw new FormatException($"no pude leer el nombre o el período (nombre: «{nombre}»)");
 
-        // El del empleado es el de la derecha; el de la izquierda dice EMPLEADOR y no coincide igual.
+        // Por palabra entera: FIRMA DEL EMPLEADOR, que está en la misma hoja, no coincide.
         var firma = Buscar(ws, "FIRMA DEL EMPLEADO").OrderByDescending(r => r.Izq).FirstOrDefault();
         return new Hoja(empleador.Length > 0 ? empleador : "EMPLEADOR", nombre, int.Parse(m.Groups[1].Value), m.Groups[2].Value, firma);
     }
 
     static string Unir(IEnumerable<Palabra> ws) => string.Join(" ", ws.OrderBy(w => w.Izq).Select(w => w.Texto)).Trim();
+
+    // El valor de un rótulo de tabla: la primera línea debajo, sin las palabras con números (el CUIL,
+    // el legajo y los importes comparten esa línea), y de ella el bloque de palabras más cercano al rótulo.
+    static string ValorDebajo(IReadOnlyList<Palabra> ws, Palabra rotulo)
+    {
+        var debajo = ws.Where(w => w.CentroY < rotulo.Abajo && w.CentroY > rotulo.Abajo - 25 && !w.Texto.Any(char.IsDigit)).ToList();
+        if (debajo.Count == 0) return "";
+        var y = debajo.Max(w => w.CentroY);
+        var bloques = new List<List<Palabra>>();
+        foreach (var w in debajo.Where(w => Math.Abs(w.CentroY - y) < 3).OrderBy(w => w.Izq))
+        {
+            // Dentro de un nombre las palabras van a un espacio; entre columnas hay mucho más.
+            if (bloques.Count > 0 && w.Izq - bloques[^1][^1].Der < 12) bloques[^1].Add(w);
+            else bloques.Add([w]);
+        }
+        var centro = (rotulo.Izq + rotulo.Der) / 2;
+        var bloque = bloques.MinBy(b => Math.Abs((b[0].Izq + b[^1].Der) / 2 - centro))!;
+        return string.Join(" ", bloque.Select(w => w.Texto));
+    }
 
     public static string SinComa(string nombre) => Regex.Replace(nombre.Replace(",", " "), @"\s+", " ").Trim().ToUpperInvariant();
 
@@ -149,12 +165,12 @@ public static class Recibos
     }
 
     // Segoe Print, la letra manuscrita que trae Windows: se toma de la PC y no viaja en el .exe,
-    // porque es de Microsoft. Si faltara, queda la Parisienne embebida (licencia OFL).
+    // porque es de Microsoft. Si faltara, queda Caveat embebida (licencia OFL), igual de sencilla.
     static readonly Lazy<byte[]> Manuscrita = new(() =>
     {
         var segoe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "segoepr.ttf");
         if (File.Exists(segoe)) return File.ReadAllBytes(segoe);
-        using var s = typeof(Recibos).Assembly.GetManifestResourceStream("Parisienne-Regular.ttf")!;
+        using var s = typeof(Recibos).Assembly.GetManifestResourceStream("Caveat-Regular.ttf")!;
         using var m = new MemoryStream();
         s.CopyTo(m);
         return m.ToArray();

@@ -21,6 +21,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="PdfPig" Version="0.1.16" />
-    <EmbeddedResource Include="Parisienne-Regular.ttf" LogicalName="Parisienne-Regular.ttf" />
+    <!-- Instancia fija (wght 400) de Caveat[wght].ttf de google/fonts, hecha con fontTools.varLib.instancer:
+         la variable trae todos los grosores y pesa más. -->
+    <EmbeddedResource Include="Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
   </ItemGroup>
 </Project>
