@@ -1,18 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- Windows: la prueba de la nómina real usa el OCR de Windows (sin la nómina, en CI, pasa vacía). -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <!-- El motor no usa WinForms ni el OCR de Windows: se compila acá directo. -->
+    <!-- El motor no usa WinForms: se compila acá directo. -->
     <Compile Include="..\app\Recibos.cs" />
     <Compile Include="..\app\Actualizador.cs" />
+    <Compile Include="..\app\WindowsOcr.cs" />
     <EmbeddedResource Include="..\app\Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="PdfPig" Version="0.1.16" />
+    <PackageReference Include="bblanchon.PDFium.Win32" Version="158.0.8111" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">

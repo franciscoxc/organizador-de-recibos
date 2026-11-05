@@ -97,24 +97,36 @@ sealed class MainForm : Form
     readonly Button update = new() { FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand, TabStop = false };
     readonly ToolTip tips = new();
     static readonly Font IconFont = new("Segoe MDL2 Assets", 10f);
+    // La revisión de la nómina: un renglón por empleado y un letrero; la ventana crece para mostrarla.
+    readonly Panel lista = new() { Left = 24, Width = 278, AutoScroll = true, Visible = false };
+    readonly Label cartel = new()
+    {
+        Left = 24, Width = 278, Height = 30, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.White,
+        Font = new Font(SystemFonts.DefaultFont.FontFamily, 11f, FontStyle.Bold), Visible = false
+    };
+    static readonly Font Negrita = new(SystemFonts.DefaultFont, FontStyle.Bold);
+    static readonly Color Verde = Color.FromArgb(36, 128, 61), Rojo = Color.FromArgb(200, 35, 45);
+    const int AltoBase = 308;
+    static readonly string CarpetasFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName, "carpetas.txt");
     readonly string[] startupFiles;
     readonly Ocr? ocr = CrearOcr();
     bool working;
     bool buscando;
     string? nuevoExe; // descargado y verificado: reemplaza al actual al reiniciar
+    Nomina? nomina; // la última leída: si después llegan recibos de ese mes, se vuelve a revisar
 
     public MainForm(string[] files)
     {
         startupFiles = files;
         Text = AppName;
-        ClientSize = new Size(326, 308);
+        ClientSize = new Size(326, AltoBase);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? Icon; } catch { }
 
         drop.PdfImage = PdfIcon();
         drop.Controls.Add(showOutput);
-        Controls.AddRange([intro, drop, status, update]);
+        Controls.AddRange([intro, drop, status, update, lista, cartel]);
         MostrarIcono();
 
         update.Click += async (_, _) =>
@@ -241,6 +253,7 @@ sealed class MainForm : Form
             .Where(p => p.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
             .ToArray();
         showOutput.Visible = false;
+        showOutput.Tag = null;
         drop.DimIcon = false;
         drop.Result = "";
         if (files.Length == 0)
@@ -250,18 +263,30 @@ sealed class MainForm : Form
         }
 
         working = true;
+        OcultarRevision();
         drop.Text = files.Length == 1 ? Path.GetFileName(files[0]) : $"{files.Length} PDF";
         var problems = new List<string>();
-        List<string> created = [];
+        var r = new Resultado([], []);
         try
         {
             // El OCR de Windows es asíncrono, pero el armado de los PDF no: afuera del hilo de la ventana.
             // Invoke y no BeginInvoke: un aviso en cola llegaría después de mostrar el resultado y se perdería.
-            created = await Task.Run(() => Recibos.Procesar(files, ocr, msg => Invoke(() =>
+            r = await Task.Run(() => Recibos.Procesar(files, ocr, msg => Invoke(() =>
             {
                 if (msg.StartsWith('⚠')) problems.Add(msg[2..]);
                 else status.Text = msg.StartsWith('✓') ? msg[2..] : msg;
             })));
+            RecordarCarpetas(r.Creados);
+            if (r.Nominas.Count > 0) nomina = r.Nominas[^1];
+            // Se revisa si llegó una nómina, o si llegaron recibos del mes de la que ya estaba cargada.
+            if (nomina is { } n && (r.Nominas.Count > 0 || r.Creados.Any(c => c.EndsWith(Recibos.Sufijo(n), StringComparison.OrdinalIgnoreCase))))
+            {
+                status.Text = "revisando la nómina…";
+                var revision = await Task.Run(() => Recibos.Revisar(n, CarpetasParaRevisar(n)));
+                MostrarRevision(n, revision);
+                // Sin recibos nuevos, «mostrar ahora» abre la carpeta donde están los de la nómina.
+                showOutput.Tag = revision.Select(x => x.Recibo).FirstOrDefault(x => x is not null);
+            }
         }
         catch (Exception ex)
         {
@@ -273,15 +298,87 @@ sealed class MainForm : Form
             status.Text = "";
         }
 
-        drop.Text = created.Count == 0 ? "No separé ningún recibo"
-            : $"{created.Count} recibos separados en\n«{Path.GetFileName(Path.GetDirectoryName(created[0]))}»";
+        drop.Text = r.Creados.Count > 0 ? $"{r.Creados.Count} recibos separados en\n«{Path.GetFileName(Path.GetDirectoryName(r.Creados[0]))}»"
+            : r.Nominas.Count > 0 ? $"Nómina {r.Nominas[^1].Mes:00}/{r.Nominas[^1].Anio} revisada"
+            : "No separé ningún recibo";
         drop.Result = problems.Count == 0 ? "" : problems.Count == 1 ? problems[0] : $"{problems[0]}\n(y {problems.Count - 1} avisos más)";
-        if (created.Count > 0)
+        if (r.Creados.Count > 0) showOutput.Tag = r.Creados[0];
+        if (showOutput.Tag is string)
         {
-            showOutput.Tag = created[0];
             showOutput.Visible = true;
             drop.DimIcon = true;
         }
+    }
+
+    // Un renglón por empleado, los que faltan primero, y abajo el letrero. La ventana crece hasta
+    // 14 renglones; con más aparece la barra de desplazamiento, para no salirse de la pantalla.
+    void MostrarRevision(Nomina n, List<(Empleado Empleado, string? Recibo)> revision)
+    {
+        foreach (var c in lista.Controls.Cast<Control>().ToList()) c.Dispose();
+        lista.Top = status.Bottom + 4;
+        lista.Controls.Add(new Label { Text = $"Nómina {n.Mes:00}/{n.Anio}", ForeColor = Color.DimGray, Left = 0, Top = 0, Width = 250, Height = 20 });
+        var y = 22;
+        foreach (var (e, recibo) in revision.OrderBy(x => x.Recibo is not null))
+        {
+            var ok = recibo is not null;
+            lista.Controls.Add(new Label { Text = ok ? "✓" : "✗", ForeColor = ok ? Verde : Rojo, Font = Negrita, Left = 0, Top = y, Width = 18, Height = 20 });
+            // El que está se muestra como su archivo, que sale del texto del recibo y es exacto; el que falta,
+            // como lo leyó el OCR en la nómina, que puede tener algún error: por eso lleva el CUIL.
+            var nombre = ok ? Path.GetFileName(recibo!)[..^Recibos.Sufijo(n).Length]
+                : e.Nombre.Length > 0 ? $"{e.Nombre}  {e.Cuil}" : e.Cuil;
+            // Un nombre largo pasa a dos renglones en vez de cortarse: en los que faltan, lo último es el CUIL.
+            var alto = TextRenderer.MeasureText(nombre, Font, new Size(236, int.MaxValue), TextFormatFlags.WordBreak).Height + 6;
+            var fila = new Label { Text = nombre, Left = 20, Top = y, Width = 236, Height = Math.Max(20, alto) };
+            tips.SetToolTip(fila, $"{nombre} (CUIL {e.Cuil})");
+            lista.Controls.Add(fila);
+            y += fila.Height;
+        }
+        lista.Height = Math.Min(y, 22 + 14 * 20);
+        lista.Visible = true;
+
+        var faltan = revision.Count(x => x.Recibo is null);
+        // Sin ningún CUIL leído no hay nada que decir «OK».
+        (cartel.Text, cartel.BackColor) = revision.Count == 0 ? ("No pude leer la nómina", Rojo)
+            : faltan == 0 ? ("TODOS OK", Verde)
+            : (faltan == 1 ? "Falta 1 recibo de sueldo" : $"Faltan {faltan} recibos de sueldo", Rojo);
+        cartel.Top = lista.Bottom + 6;
+        cartel.Visible = true;
+        ClientSize = new Size(ClientSize.Width, cartel.Bottom + 12);
+    }
+
+    void OcultarRevision()
+    {
+        lista.Visible = cartel.Visible = false;
+        ClientSize = new Size(ClientSize.Width, AltoBase);
+    }
+
+    // Donde pueden estar los recibos ya separados: la carpeta de la nómina y las que tiene adentro (ahí
+    // cae la del empleador), y las carpetas donde la app exportó hace poco, aunque se haya cerrado en el medio.
+    static IEnumerable<string> CarpetasParaRevisar(Nomina n)
+    {
+        var carpeta = Path.GetDirectoryName(n.Ruta)!;
+        string[] adentro = [];
+        try { adentro = Directory.GetDirectories(carpeta); } catch { }
+        return [carpeta, .. adentro, .. CarpetasRecientes()];
+    }
+
+    static List<string> CarpetasRecientes()
+    {
+        try { return File.ReadAllLines(CarpetasFile).Where(l => l.Length > 0).ToList(); }
+        catch { return []; } // la primera vez no hay lista
+    }
+
+    static void RecordarCarpetas(List<string> creados)
+    {
+        if (creados.Count == 0) return;
+        try
+        {
+            var todas = creados.Select(Path.GetDirectoryName).OfType<string>().Concat(CarpetasRecientes())
+                .Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
+            Directory.CreateDirectory(Path.GetDirectoryName(CarpetasFile)!);
+            File.WriteAllLines(CarpetasFile, todas);
+        }
+        catch { } // recordar es un extra: sin la lista igual se revisan las carpetas al lado de la nómina
     }
 
     void OpenOutput()
