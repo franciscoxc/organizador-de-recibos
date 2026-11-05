@@ -8,6 +8,7 @@
   <ItemGroup>
     <!-- El motor no usa WinForms ni el OCR de Windows: se compila acá directo. -->
     <Compile Include="..\app\Recibos.cs" />
+    <Compile Include="..\app\Actualizador.cs" />
     <EmbeddedResource Include="..\app\Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
   </ItemGroup>
   <ItemGroup>

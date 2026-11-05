@@ -8,6 +8,8 @@
     <AssemblyName>Organizador de Recibos</AssemblyName>
     <Title>Organizador de Recibos</Title>
     <Product>Organizador de Recibos</Product>
+    <!-- La versión real la pone el workflow desde el tag; 0.0.0 marca una compilación local. -->
+    <Version>0.0.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>

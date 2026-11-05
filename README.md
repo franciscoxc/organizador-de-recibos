@@ -40,6 +40,14 @@ primero la x64. Los SHA-256 de cada versión están en las notas de su release.
 Como el `.exe` no está firmado, Windows puede mostrar "Windows protegió tu PC":
 toca `Más información` y luego `Ejecutar de todas formas`.
 
+## Actualizaciones
+
+Al abrirse, la app busca en silencio si hay una versión nueva; la flecha
+circular de la esquina busca a mano. Si hay una, la descarga, verifica su
+huella SHA-256 contra la que publica GitHub y el botón pasa a
+`Reiniciar para actualizar`. Si el programa está en una carpeta que no deja
+escribir (como Archivos de programa), abre la página de descarga.
+
 ## Compilar
 
 Con .NET 10 en Windows: `app/build-windows.bat`. Las pruebas: `dotnet test tests`.

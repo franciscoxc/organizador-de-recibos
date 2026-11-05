@@ -87,28 +87,41 @@ sealed class MainForm : Form
     readonly Label intro = new()
     {
         Text = "Un PDF por empleado y mes, con sus iniciales,\nen la carpeta del empleador.",
-        Left = 24, Top = 10, Width = 278, Height = 40, ForeColor = Color.DimGray
+        Left = 24, Top = 34, Width = 278, Height = 40, ForeColor = Color.DimGray
     };
-    readonly DropBox drop = new() { Text = DropHint, Left = 24, Top = 54, Width = 278, Height = 190, AllowDrop = true, Cursor = Cursors.Hand };
-    readonly Label status = new() { Left = 24, Top = 252, Width = 278, Height = 24, Font = new Font(SystemFonts.DefaultFont.FontFamily, 10f, FontStyle.Bold), ForeColor = Color.FromArgb(36, 107, 87) };
+    readonly DropBox drop = new() { Text = DropHint, Left = 24, Top = 78, Width = 278, Height = 190, AllowDrop = true, Cursor = Cursors.Hand };
+    readonly Label status = new() { Left = 24, Top = 276, Width = 278, Height = 24, Font = new Font(SystemFonts.DefaultFont.FontFamily, 10f, FontStyle.Bold), ForeColor = Color.FromArgb(36, 107, 87) };
     readonly Button showOutput = new() { Text = "mostrar ahora", Left = 84, Top = 150, Width = 110, Height = 28, Visible = false };
+    // Arriba a la derecha: la flecha circular busca una versión nueva; cuando la descargó, el mismo
+    // botón dice «Reiniciar para actualizar».
+    readonly Button update = new() { FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand, TabStop = false };
+    readonly ToolTip tips = new();
+    static readonly Font IconFont = new("Segoe MDL2 Assets", 10f);
     readonly string[] startupFiles;
     readonly Ocr? ocr = CrearOcr();
     bool working;
+    bool buscando;
+    string? nuevoExe; // descargado y verificado: reemplaza al actual al reiniciar
 
     public MainForm(string[] files)
     {
         startupFiles = files;
         Text = AppName;
-        ClientSize = new Size(326, 284);
+        ClientSize = new Size(326, 308);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? Icon; } catch { }
 
         drop.PdfImage = PdfIcon();
         drop.Controls.Add(showOutput);
-        Controls.AddRange([intro, drop, status]);
+        Controls.AddRange([intro, drop, status, update]);
+        MostrarIcono();
 
+        update.Click += async (_, _) =>
+        {
+            if (nuevoExe is null) await BuscarActualizacion(manual: true);
+            else Reiniciar();
+        };
         showOutput.Click += (_, _) => OpenOutput();
         drop.Click += async (_, _) => await Pick();
         drop.DragEnter += (_, e) =>
@@ -122,8 +135,84 @@ sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             AddToSendTo();
+            _ = BuscarActualizacion(manual: false);
+            // La versión anterior se cierra apenas abre esta: un rato después ya se puede borrar.
+            _ = Task.Delay(3000).ContinueWith(_ => Actualizador.BorrarViejo());
             if (startupFiles.Length > 0) await ProcessAll(startupFiles);
         };
+    }
+
+    async Task BuscarActualizacion(bool manual)
+    {
+        if (buscando) return;
+        buscando = true;
+        update.Enabled = false;
+        try
+        {
+            var nueva = await Actualizador.Buscar();
+            if (nueva is null)
+            {
+                if (manual) status.Text = $"Ya tenés la última versión ({Actualizador.Actual})";
+                return;
+            }
+            nuevoExe = await Actualizador.Descargar(nueva, new Progress<int>(p => MostrarTexto($"descargando {p}%")));
+            tips.SetToolTip(update, $"La versión {nueva.Version} ya está descargada");
+        }
+        catch (UnauthorizedAccessException) when (manual)
+        {
+            // La carpeta del programa no deja escribir (Archivos de programa, por ejemplo): a mano.
+            Process.Start(new ProcessStartInfo(Actualizador.Pagina) { UseShellExecute = true });
+            status.Text = "Bajá la versión nueva de la página que se abrió";
+        }
+        catch (Exception) when (manual)
+        {
+            status.Text = "No pude buscar actualizaciones";
+        }
+        catch { } // la búsqueda al abrir es silenciosa: sin internet, no molesta
+        finally
+        {
+            buscando = false;
+            update.Enabled = true;
+            if (nuevoExe is null) MostrarIcono();
+            else MostrarTexto("Reiniciar para actualizar");
+        }
+    }
+
+    void Reiniciar()
+    {
+        if (working) return; // no cortar una separación a la mitad
+        try
+        {
+            Actualizador.Reemplazar(nuevoExe!);
+            Close();
+        }
+        catch
+        {
+            status.Text = "No pude reiniciar: cerrá y abrí el programa";
+        }
+    }
+
+    void MostrarIcono()
+    {
+        update.FlatAppearance.BorderSize = 0;
+        update.Font = IconFont;
+        update.Text = ""; // Refresh: el ícono de actualizar de Windows
+        update.AccessibleName = "Buscar actualización"; // el lector de pantalla no puede leer el ícono
+        update.ForeColor = Color.DimGray;
+        update.SetBounds(ClientSize.Width - 34, 4, 28, 26);
+        tips.SetToolTip(update, $"Versión {Actualizador.Actual}: buscar actualización");
+    }
+
+    void MostrarTexto(string texto)
+    {
+        if (update.Text == texto) return; // el progreso llega cientos de veces con el mismo porcentaje
+        update.FlatAppearance.BorderSize = 1;
+        update.Font = SystemFonts.DefaultFont;
+        update.Text = texto;
+        update.AccessibleName = texto;
+        update.ForeColor = Color.FromArgb(36, 107, 87);
+        var ancho = TextRenderer.MeasureText(texto, update.Font).Width + 20;
+        update.SetBounds(ClientSize.Width - ancho - 6, 4, ancho, 26);
     }
 
     static Ocr? CrearOcr()

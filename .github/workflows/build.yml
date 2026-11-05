@@ -24,8 +24,11 @@ jobs:
       - name: Compilar x64 y ARM64
         working-directory: app
         run: |
-          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-x64 -o publish/win-x64
-          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-arm64 -o publish/win-arm64
+          # La versión sale del tag (v1.0.3 -> 1.0.3): el botón de actualizar la compara con la última
+          # publicada. Sin tag queda en 0.0.0, la del csproj.
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0' }
+          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-x64 -p:Version=$v -o publish/win-x64
+          dotnet publish "Organizador de Recibos.csproj" -c Release -r win-arm64 -p:Version=$v -o publish/win-arm64
           Copy-Item "publish/win-x64/Organizador de Recibos.exe" ../Organizador.de.Recibos.x64.exe
           Copy-Item "publish/win-arm64/Organizador de Recibos.exe" ../Organizador.de.Recibos.arm.exe
 

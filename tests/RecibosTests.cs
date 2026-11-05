@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
@@ -19,6 +20,22 @@ public class RecibosTests
     public void Nombre_de_archivo_con_mes_de_dos_digitos()
     {
         Assert.Equal("GOMEZ LUCIA 07 2026.pdf", Recibos.NombreArchivo("GOMEZ, LUCIA", 7, "2026"));
+    }
+
+    const string Release = """
+        {"tag_name": "v1.0.3", "assets": [
+          {"name": "Organizador.de.Recibos.arm.exe", "size": 10, "digest": "sha256:aa", "browser_download_url": "https://x/arm.exe"},
+          {"name": "Organizador.de.Recibos.x64.exe", "size": 20, "digest": "sha256:bb", "browser_download_url": "https://x/x64.exe"}]}
+        """;
+
+    [Fact]
+    public void Actualizacion_elige_el_exe_de_la_pc_solo_si_es_mas_nueva()
+    {
+        Assert.Equal("https://x/arm.exe", Actualizador.Elegir(Release, new Version(1, 0, 2), Architecture.Arm64)!.Url);
+        Assert.Equal("bb", Actualizador.Elegir(Release, new Version(1, 0, 2), Architecture.X64)!.Sha256);
+        // El ensamblado dice 1.0.3.0: no tiene que parecer más vieja que el tag v1.0.3.
+        Assert.Null(Actualizador.Elegir(Release, new Version(1, 0, 3, 0), Architecture.X64));
+        Assert.Null(Actualizador.Elegir(Release, new Version(1, 1, 0), Architecture.X64));
     }
 
     // Caveat es el respaldo si la PC no tiene Segoe Print: PdfPig tiene que poder incrustarla.
