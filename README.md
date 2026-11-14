@@ -20,8 +20,13 @@ además que no falte el recibo de nadie.
 ## Cómo se usa
 
 1. Abre `Organizador de Recibos`.
-2. Tira uno o varios PDF (o una carpeta) al recuadro.
-3. El botón `mostrar ahora` abre la carpeta con los recibos separados.
+2. Tira uno o varios PDF (o una carpeta) a la tarjeta, o haz clic en ella para
+   buscarlos.
+3. Cada recibo separado vuela a la ficha de la carpeta del empleador; al tocar la
+   ficha se abre la carpeta.
+
+La ventana tiene el diseño de Windows 11: sigue el modo claro u oscuro de Windows
+y usa su fondo Mica.
 
 También puedes arrastrar los PDF sobre el ícono del `.exe` o usar
 `Enviar a → Organizador de Recibos` en el menú del botón derecho del Explorador.
@@ -34,7 +39,7 @@ Windows, sin instalar nada.
 
 ## Revisar la nómina
 
-Si en el recuadro también tiras la nómina de la declaración jurada de AFIP
+Si en la tarjeta también tiras la nómina de la declaración jurada de AFIP
 (F.931, la página «Ver Nómina» guardada como PDF), la app la lee con el OCR y
 revisa que cada empleado tenga su recibo de ese mes. La ventana se estira y
 muestra un ✓ o una ✗ por empleado, primero los que faltan, y abajo `TODOS OK` o

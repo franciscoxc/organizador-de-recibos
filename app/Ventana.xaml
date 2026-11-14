@@ -1,0 +1,151 @@
+<!-- Sin Background propio: el tema Fluent deja la ventana transparente y Windows 11 pone Mica detrás. -->
+<Window x:Class="Ventana"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Organizador de Recibos" Width="400" SizeToContent="Height" ResizeMode="CanMinimize"
+        WindowStartupLocation="CenterScreen" AllowDrop="True" UseLayoutRounding="True"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14">
+    <Window.Resources>
+        <!-- Los colores de la marca salen del ícono: el amarillo de la carpeta y el azul del PDF. -->
+        <SolidColorBrush x:Key="Carpeta" Color="#EBB41C"/>
+        <SolidColorBrush x:Key="Pdf" Color="#4F9BE8"/>
+        <FontFamily x:Key="Iconos">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+        <FontFamily x:Key="Titulos">Segoe UI Variable Display, Segoe UI</FontFamily>
+        <!-- Botón sin aspecto de botón: la tarjeta, las fichas y la flecha se dibujan solas, y siguen siendo
+             botones para el teclado y el lector de pantalla. -->
+        <Style x:Key="Llano" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <ContentPresenter/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <StackPanel Margin="20,10,20,20">
+            <!-- Arriba a la derecha: la flecha circular busca una versión nueva; cuando la descargó, el mismo
+                 botón se estira hasta decir «Reiniciar para actualizar». -->
+            <Button x:Name="actualizar" Style="{StaticResource Llano}" HorizontalAlignment="Right"
+                    AutomationProperties.Name="Buscar actualización">
+                <Grid x:Name="actualizarCaja" Width="32" Height="32">
+                    <Border CornerRadius="16" Background="{DynamicResource SubtleFillColorSecondaryBrush}"/>
+                    <Border x:Name="actualizarAcento" CornerRadius="16" Opacity="0"
+                            Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+                    <Ellipse x:Name="anillo" Width="28" Height="28" Margin="0,0,2,0" HorizontalAlignment="Right"
+                             StrokeThickness="2" Opacity="0" RenderTransformOrigin="0.5,0.5"
+                             Stroke="{DynamicResource AccentFillColorDefaultBrush}">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="-90"/>
+                        </Ellipse.RenderTransform>
+                    </Ellipse>
+                    <TextBlock x:Name="actualizarTexto" Text="Reiniciar para actualizar" Opacity="0" Margin="14,0,34,0"
+                               VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                    <Grid Width="32" HorizontalAlignment="Right" RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <TransformGroup>
+                                <ScaleTransform x:Name="flechaEscala"/>
+                                <RotateTransform x:Name="giro"/>
+                            </TransformGroup>
+                        </Grid.RenderTransform>
+                        <TextBlock x:Name="flecha" Text="&#xE72C;" FontFamily="{StaticResource Iconos}" FontSize="14"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    </Grid>
+                </Grid>
+            </Button>
+
+            <!-- La tarjeta: donde se sueltan los PDF, o se hace clic para buscarlos. -->
+            <Button x:Name="tarjeta" Style="{StaticResource Llano}" Margin="0,8,0,0" RenderTransformOrigin="0.5,0.5"
+                    AutomationProperties.Name="Elegir los PDF de los recibos o de la nómina">
+                <Button.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="tarjetaEscala"/>
+                        <TranslateTransform x:Name="tarjetaCorrida"/>
+                    </TransformGroup>
+                </Button.RenderTransform>
+                <Grid MinHeight="236">
+                    <Border CornerRadius="12" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
+                    <!-- Un resplandor del amarillo de la carpeta detrás del ícono: le da calor en los dos modos. -->
+                    <Ellipse Width="260" Height="180" VerticalAlignment="Top" Margin="0,4,0,0" IsHitTestVisible="False">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush>
+                                <GradientStop Color="#3DEBB41C" Offset="0"/>
+                                <GradientStop Color="#00EBB41C" Offset="1"/>
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
+                    <!-- Punteado: dice «soltá acá». Con archivos encima se vuelve continuo y del color de acento. -->
+                    <Rectangle x:Name="borde" RadiusX="12" RadiusY="12" StrokeThickness="1.5" StrokeDashArray="4 3"
+                               Stroke="{DynamicResource ControlStrongStrokeColorDefaultBrush}"/>
+                    <StackPanel VerticalAlignment="Center" Margin="18,20,18,20">
+                        <Image x:Name="icono" Source="app.png" Width="96" Height="96" RenderTransformOrigin="0.5,0.7"
+                               RenderOptions.BitmapScalingMode="HighQuality">
+                            <Image.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="iconoEscala"/>
+                                    <RotateTransform x:Name="iconoGiro"/>
+                                    <TranslateTransform x:Name="iconoAltura"/>
+                                </TransformGroup>
+                            </Image.RenderTransform>
+                        </Image>
+                        <TextBlock Margin="0,12,0,0" TextAlignment="Center" TextWrapping="Wrap"
+                                   FontFamily="{StaticResource Titulos}" FontSize="19" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                   Text="Soltá acá los recibos o la nómina"/>
+                        <TextBlock Margin="6,4,6,0" TextAlignment="Center" TextWrapping="Wrap" FontSize="13"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="Un PDF por empleado y mes, con sus iniciales en la firma. O hacé clic para buscarlos."/>
+                        <TextBlock x:Name="estado" Margin="0,10,0,0" TextAlignment="Center" FontSize="12"
+                                   TextTrimming="CharacterEllipsis" Visibility="Collapsed"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    </StackPanel>
+                </Grid>
+            </Button>
+
+            <!-- Una ficha por carpeta de empleador: ahí van a parar los recibos que salen de la tarjeta. -->
+            <WrapPanel x:Name="fichas" Margin="0,4,0,0"/>
+            <TextBlock x:Name="avisos" Margin="4,10,4,0" TextWrapping="Wrap" FontSize="13" Visibility="Collapsed"
+                       Foreground="{DynamicResource SystemFillColorCriticalBrush}"/>
+
+            <!-- La revisión de la nómina: un renglón por empleado y un letrero. Crece con resorte y la ventana
+                 lo acompaña (SizeToContent). -->
+            <Grid x:Name="seccion" Height="0" ClipToBounds="True">
+                <StackPanel x:Name="seccionContenido" VerticalAlignment="Top">
+                    <TextBlock x:Name="seccionTitulo" Margin="4,18,0,8" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    <ScrollViewer x:Name="desplazar" MaxHeight="448" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <Canvas x:Name="filas" Height="0"/>
+                    </ScrollViewer>
+                    <Grid x:Name="cartel" Height="46" Margin="0,14,0,0" Opacity="0">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="cartelAltura"/>
+                        </Grid.RenderTransform>
+                        <Border CornerRadius="10" Background="#C42B1C"/>
+                        <Border x:Name="cartelVerde" CornerRadius="10" Background="#107C10" Opacity="0"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock x:Name="cartelIcono" FontFamily="{StaticResource Iconos}" FontSize="16"
+                                       Margin="0,1,10,0" VerticalAlignment="Center" Foreground="White"
+                                       RenderTransformOrigin="0.5,0.5">
+                                <TextBlock.RenderTransform>
+                                    <ScaleTransform x:Name="cartelIconoEscala"/>
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
+                            <TextBlock x:Name="cartelTexto" FontFamily="{StaticResource Titulos}" FontSize="16"
+                                       FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"
+                                       AutomationProperties.LiveSetting="Polite"/>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Grid>
+        </StackPanel>
+
+        <!-- Encima de todo: los recibos que vuelan y las burbujas. No ataja clics. -->
+        <Canvas x:Name="capa" IsHitTestVisible="False"/>
+    </Grid>
+</Window>
