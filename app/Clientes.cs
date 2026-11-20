@@ -199,6 +199,22 @@ public static class Clientes
         return candidatos.Count == 1 ? candidatos[0] : null;
     }
 
+    /// <summary>Los empleados que aparecen en la hoja sin su CUIL entero: por el nombre (al menos dos de sus palabras, o
+    /// todas si tiene menos), o por un CUIL casi igual con algo del nombre. Una hoja puede traer varios recibos,
+    /// escaneados de a dos, y cada uno se busca por su cuenta; los que ya están por su CUIL no se repiten.</summary>
+    public static List<Empleado> Nombrados(string texto, IReadOnlyList<Empleado> nomina, ICollection<string> yaEstan)
+    {
+        var palabras = Partes(texto).ToHashSet();
+        var presentes = nomina.Select(e => (Empleado: e, Total: Partes(e.Nombre).Length, Estan: Partes(e.Nombre).Where(palabras.Contains).ToHashSet())).ToList();
+        // Si dos comparten palabras («PEREZ JUAN CARLOS» y «PEREZ JUAN MARTIN»), cuenta el que tiene más en la hoja: el
+        // otro aparece solo por lo que comparten.
+        var lista = presentes
+            .Where(t => t.Total > 0 && t.Estan.Count >= Math.Min(2, t.Total) && !presentes.Any(o => t.Estan.IsProperSubsetOf(o.Estan)))
+            .Select(t => t.Empleado).Where(e => !yaEstan.Contains(e.Cuil)).ToList();
+        if (PorCuilParecido(texto, nomina) is { } parecido && !yaEstan.Contains(parecido.Cuil) && !lista.Contains(parecido)) lista.Add(parecido);
+        return lista;
+    }
+
     // El tipo y el DNI: los diez primeros dígitos del CUIL, sin el verificador.
     static string? Diez(string cuil) => cuil.Replace("-", "") is { Length: >= 10 } d ? d[..10] : null;
 
@@ -358,7 +374,9 @@ public static class Clientes
         var firmado = porCuil.Keys.ToDictionary(c => c, _ => new List<Hallazgo>());
         var sinFirmar = porCuil.Keys.ToDictionary(c => c, _ => new List<Hallazgo>());
         var deLaApp = new HashSet<Hallazgo>(); // con las iniciales que estampó el estudio
-        var porNombre = new HashSet<Hallazgo>();
+        // Quién se encontró en cada hoja sin su CUIL entero, de a (hoja, CUIL): en una hoja con dos recibos, uno puede
+        // estar por su CUIL y el otro solo por el nombre, y la marca de revisar es solo del segundo.
+        var porNombre = new HashSet<(Hallazgo, string)>();
         var ilegibles = new List<Hallazgo>();
 
         // De a varios archivos a la vez, uno por núcleo: el OCR de una foto usa uno solo, y de a uno la primera
@@ -389,17 +407,14 @@ public static class Clientes
                         foreach (var c in cuils) sinFirmar[c].Add(h);
                     continue;
                 }
-                if (cuils.Count == 0 && PorNombre(h.Lectura.Texto, empleados) is { } p)
+                // ponytail-keep: a cada uno de los que faltan, aunque la hoja ya haya dado con alguien por su CUIL. Antes
+                // se buscaba por el nombre solo en las hojas sin nadie: en un escaneo de dos recibos por hoja, el CUIL de
+                // una empleada salió entero y el del otro no, la hoja quedó de ella y él figuraba sin firma aunque su
+                // nombre estaba en el texto. Los que se encuentran así quedan para revisar.
+                foreach (var otro in Nombrados(h.Lectura.Texto, empleados, cuils))
                 {
-                    cuils.Add(p.Cuil);
-                    porNombre.Add(h);
-                }
-                // Si no, el CUIL leído con uno o dos dígitos cambiados y algo del nombre de esa persona en la hoja.
-                // También queda para mirar.
-                if (cuils.Count == 0 && PorCuilParecido(h.Lectura.Texto, empleados) is { } parecido)
-                {
-                    cuils.Add(parecido.Cuil);
-                    porNombre.Add(h);
+                    cuils.Add(otro.Cuil);
+                    porNombre.Add((h, otro.Cuil));
                 }
                 // Lo último: el nombre del archivo. Las fotos se guardan con el del empleado («PEREZ JUAN RECIBO OCT
                 // 2026.jpeg»), y en octubre las que el OCR no leía eran justo esas. Solo en archivos de una hoja (un PDF
@@ -408,7 +423,7 @@ public static class Clientes
                     && PorNombre(Path.GetFileNameWithoutExtension(f.Name), empleados) is { } q)
                 {
                     cuils.Add(q.Cuil);
-                    porNombre.Add(h);
+                    porNombre.Add((h, q.Cuil));
                 }
                 if (cuils.Count == 0)
                 {
@@ -425,7 +440,7 @@ public static class Clientes
             var hs = firmado[x.Cuil];
             var firma = hs.Count == 0 ? Firma.Falta
                 : hs.All(deLaApp.Contains) ? Firma.ConIniciales
-                : hs.All(porNombre.Contains) ? Firma.PorNombre
+                : hs.All(h => porNombre.Contains((h, x.Cuil))) ? Firma.PorNombre
                 : Firma.Firmado;
             return new Renglon(x, firma, hs, sinFirmar[x.Cuil]);
         }).ToList();
@@ -434,9 +449,16 @@ public static class Clientes
 
     /// <summary>Las hojas de los firmados que la lectura rápida dejó sin un CUIL de la nómina (las sin nadie, y las que
     /// se encontraron solo por el nombre) y que todavía no se leyeron a fondo.</summary>
+    /// <summary>Si el cliente no mandó ningún firmado (ni foto ni escaneo de nadie) y hay recibos originales para armarlos
+    /// con las iniciales del estudio: el caso de último recurso, cuando ya no hay tiempo de volver a pedirlos.</summary>
+    public static bool NoMandoNada(Revision r) =>
+        r.Nomina is not null && !r.Renglones.Any(x => x.Firma is Firma.Firmado or Firma.PorNombre)
+        && r.Renglones.Any(x => x.Firma == Firma.Falta && x.SinFirmar.Count > 0);
+
     public static List<Hallazgo> Dificiles(Revision r) => r.Ilegibles
         .Concat(r.Renglones.Where(x => x.Firma == Firma.PorNombre).SelectMany(x => x.Firmado))
-        .Where(h => h.Lectura.Ocr && !h.Lectura.AFondo).DistinctBy(h => (h.Ruta, h.Hoja)).ToList();
+        // También las hojas con texto propio: un escaneo puede traer el OCR del escáner, peor que el de la app.
+        .Where(h => !h.Lectura.AFondo).DistinctBy(h => (h.Ruta, h.Hoja)).ToList();
 
     /// <summary>La segunda pasada: lee a fondo las hojas difíciles del cliente y deja lo leído en la memoria. Después
     /// hay que revisarlo de nuevo, que sale de la memoria. Devuelve cuántas leyó.</summary>
@@ -444,15 +466,22 @@ public static class Clientes
     {
         if (r.Nomina is null) return 0;
         var cuils = r.Nomina.Empleados.Select(e => e.Cuil).ToList();
-        bool Buscado(string texto) => DeLaNomina(texto, cuils).Count > 0;
+        // En una hoja donde alguien se encontró solo por el nombre se busca su CUIL, no cualquiera: en una de dos recibos,
+        // el del otro ya se leía, y con él la lectura a fondo terminaba antes de probar nada.
+        var porNombre = r.Renglones.Where(x => x.Firma == Firma.PorNombre)
+            .SelectMany(x => x.Firmado.Select(h => (Clave: (h.Ruta, h.Hoja), x.Empleado.Cuil))).ToLookup(t => t.Clave, t => t.Cuil);
         var hojas = Dificiles(r);
         await Parallel.ForEachAsync(hojas, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = corte },
             async (h, _) =>
             {
                 avisar(Path.GetFileName(h.Ruta));
+                var buscados = porNombre.Contains((h.Ruta, h.Hoja)) ? porNombre[(h.Ruta, h.Hoja)].ToList() : cuils;
                 try
                 {
-                    var l = await ConTurno(() => aFondo(h.Ruta, h.Hoja, Buscado), corte);
+                    var l = await ConTurno(() => aFondo(h.Ruta, h.Hoja, t => DeLaNomina(t, buscados).Count > 0), corte);
+                    // Una hoja con texto propio se queda con los dos textos: lo que el escáner leyó bien de alguien no se
+                    // pierde si la lectura de la app lo lee peor.
+                    if (!h.Lectura.Ocr) l = l with { Texto = h.Lectura.Texto + "\n" + l.Texto, Nombre = h.Lectura.Nombre ?? l.Nombre };
                     memoria.Reemplazar(new FileInfo(h.Ruta), Math.Max(0, h.Hoja - 1), l with { AFondo = true });
                 }
                 catch (Exception e) when (e is not OperationCanceledException)

@@ -231,6 +231,78 @@ public class ClientesTests(ITestOutputHelper salida)
         finally { Directory.Delete(raiz, recursive: true); }
     }
 
+    // La carpeta de firmados de un cliente armado como los del estudio, sin nada adentro.
+    static string Firmados(string cliente) => Directory.CreateDirectory(Path.Combine(cliente, "4. SUELDOS Y CARGAS SOCIALES",
+        "1  LIQUIDACIONES DE SUELDOS 2026", $"{Path.GetFileName(cliente)} SUELDOS OCTUBRE 2026", "RECIBOS FIRMADOS OCTUBRE")).FullName;
+
+    [Fact]
+    public async Task Una_hoja_con_dos_recibos_cuenta_para_los_dos()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            File.WriteAllBytes(Path.Combine(Firmados(cliente), "ESCANEO.jpeg"), [0xFF, 0xD8]);
+            // Escaneados de a dos: el CUIL de Gómez salió entero; el de Rojas no, pero está su nombre.
+            LeerImagen deADos = (_, _, _) => Task.FromResult(new Lectura(
+                $"APELLIDO Y NOMBRE GOMEZ, LUCIA CUIL {Gomez.Cuil} APELLIDO Y NOMBRE ROJAS, PABLO CUIL 2?-4??78901-4", Ocr: true));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, deADos, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            // Los dos están; la marca de revisar es solo de Rojas, no de Gómez, aunque compartan la hoja.
+            Assert.Equal([Firma.Firmado, Firma.PorNombre, Firma.Falta, Firma.Falta], r.Renglones.Select(x => x.Firma));
+            Assert.Empty(r.Ilegibles);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Un_escaneo_con_texto_propio_pasa_por_la_lectura_a_fondo()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // Un PDF con el texto que le puso el escáner: el CUIL de Gómez salió bien; de Rojas, solo el nombre.
+            Pdf(Path.Combine(Firmados(cliente), "ESCANEO.pdf"),
+                [("GOMEZ LUCIA", 40, 800), (Gomez.Cuil, 250, 800), ("ROJAS PABLO", 40, 400), ("2?-4??78901-4", 250, 400)]);
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal([Firma.Firmado, Firma.PorNombre], r.Renglones.Take(2).Select(x => x.Firma));
+            // Tiene texto, pero queda alguien por revisar: va a la lectura a fondo, que busca el CUIL de Rojas y no cualquiera.
+            Assert.Single(Clientes.Dificiles(r));
+            Func<string, bool>? buscado = null;
+            LeerImagen aFondo = (_, _, b) =>
+            {
+                buscado = b;
+                return Task.FromResult(new Lectura($"ROJAS PABLO CUIL {Rojas.Cuil} GOMEZ LUC1A 27-2345", Ocr: true)); // al de Gómez lo lee peor
+            };
+            Assert.Equal(1, await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None));
+            Assert.False(buscado!($"CUIL {Gomez.Cuil}"));
+            Assert.True(buscado!($"CUIL {Rojas.Cuil}"));
+            // Con los dos textos, los dos quedan firmados, y la hoja no se vuelve a leer.
+            var otra = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal([Firma.Firmado, Firma.Firmado], otra.Renglones.Take(2).Select(x => x.Firma));
+            Assert.Empty(Clientes.Dificiles(otra));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Sabe_si_el_cliente_no_mando_nada()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            // Sin carpeta de firmados: no mandó nada, y hay originales para armarlos con iniciales.
+            var nada = await Clientes.Revisar(Cliente(raiz, "PEREZ JUAN", conFirmados: false), 10, 2026, null, Leer, memoria, _ => { }, CancellationToken.None);
+            Assert.True(Clientes.NoMandoNada(nada));
+            // Con la foto firmada de Gómez ya mandó algo, aunque falten otros.
+            var algo = await Clientes.Revisar(Cliente(raiz, "PEREZ ANA", conFirmados: true), 10, 2026, null, Leer, memoria, _ => { }, CancellationToken.None);
+            Assert.False(Clientes.NoMandoNada(algo));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
     [Fact]
     public async Task Revisa_y_guarda_sin_pisar_nada()
     {

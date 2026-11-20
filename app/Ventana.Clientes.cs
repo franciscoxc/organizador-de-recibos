@@ -47,7 +47,11 @@ public partial class Ventana
     // El ícono «se guarda derecho» de cada uno: al recalcular el plan (por tildar iniciales) se reusa y no vuelve a entrar.
     readonly Dictionary<string, (Button Boton, TextBlock Glifo)> iconosPlan = new();
 
-    sealed record Ranura(StackPanel Acciones, TextBlock Debajo, Border Despliegue, string Nombre, TextBlock? Lupa);
+    sealed record Ranura(StackPanel Acciones, TextBlock Debajo, Border Despliegue, string Nombre, TextBlock? Lupa, CheckBox? Casilla);
+    // ponytail-keep: la columna de la derecha de los renglones de empleados mide lo mismo en todos (SharedSizeGroup,
+    // con panelLista como alcance). Si cada renglón midiera la suya, el ícono de «se guarda derecho» quedaba contra el
+    // borde y las casillas de «Firmar iniciales», más adentro: no se alineaban. Así arrancan todos en la misma línea.
+    const string Derecha = "Derecha";
 
     sealed class FilaCliente
     {
@@ -748,6 +752,7 @@ public partial class Ventana
                 lista.Add(Nota(f.Dificiles == 1
                     ? "Queda 1 hoja difícil por leer de este cliente. Para firmar iniciales, esperá a que termine: el firmado puede estar ahí."
                     : $"Quedan {f.Dificiles} hojas difíciles por leer de este cliente. Para firmar iniciales, esperá a que terminen: el firmado puede estar ahí."));
+            if (Clientes.NoMandoNada(r)) lista.Add(UltimoRecurso(f));
             if (r.Nomina is not null) lista.Add(Seccion("Empleados"));
             if (r.CarpetaMes is null) lista.Add(Nota($"No encontré la carpeta de {mes.ToLowerInvariant()} adentro de la de sueldos."));
             else if (r.Nomina is null) lista.Add(Nota("No encontré la nómina de AFIP del mes: un PDF con «NOMINA» en el nombre."));
@@ -774,6 +779,42 @@ public partial class Ventana
         guardarCliente.Visibility = Visibility.Collapsed;
         AbrirPanel(Muestra.Cliente);
         _ = PlanDelCliente(f, seccion);
+    }
+
+    // Un cliente que no mandó ningún firmado: se ofrece armarlos todos con las iniciales del estudio, dicho como lo que es,
+    // un último recurso para cuando ya no hay tiempo de volver a pedirlos. El botón solo tilda las casillas: cada uno se
+    // puede mirar con su lupa y nada se escribe hasta «Guardar».
+    FrameworkElement UltimoRecurso(FilaCliente f)
+    {
+        var titulo = new TextBlock { Text = "No mandó ningún recibo firmado", FontSize = 13, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        titulo.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+        var texto = Nota("Si ya no hay tiempo de volver a pedirlos, se pueden armar con las iniciales de cada empleado sobre su recibo original. " +
+                         "Es un último recurso: en la lista quedan como «con iniciales», no como firmados por el empleado.");
+        const string Todos = "Firmar todos con iniciales";
+        var boton = new Button { Content = Todos, HorizontalAlignment = HorizontalAlignment.Left, Margin = new(0, 6, 0, 0), IsEnabled = f.Dificiles == 0 };
+        if (f.Dificiles > 0) boton.ToolTip = "Todavía se están leyendo hojas difíciles de este cliente";
+        boton.Click += (_, _) =>
+        {
+            var casillas = ranuras.Values.Select(x => x.Casilla).OfType<CheckBox>().ToList();
+            var tildar = casillas.Any(c => c.IsChecked != true);
+            // Una tras otra, de arriba abajo: se ve qué se tildó y en qué orden.
+            for (var i = 0; i < casillas.Count; i++)
+            {
+                var c = casillas[i];
+                Luego(i * 70, () => c.IsChecked = tildar);
+            }
+            boton.Content = tildar ? "Desmarcar todos" : Todos;
+        };
+        var icono = new TextBlock { Text = Alerta, FontFamily = (FontFamily)FindResource("Iconos"), FontSize = 14, Margin = new(0, 1, 10, 0), Foreground = Amarillo, VerticalAlignment = VerticalAlignment.Top };
+        var textos = new StackPanel { Children = { titulo, texto, boton } };
+        Grid.SetColumn(textos, 1);
+        var tarjeta = new Border
+        {
+            CornerRadius = new(8), BorderThickness = new(1), BorderBrush = Amarillo, Padding = new(12, 10, 12, 12), Margin = new(0, 4, 0, 6),
+            Child = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition() }, Children = { icono, textos } },
+        };
+        tarjeta.SetResourceReference(Border.BackgroundProperty, "CardBackgroundFillColorDefaultBrush");
+        return tarjeta;
     }
 
     // Lo que se guardaría de un cliente, en su panel. Se calcula aparte (mira en la carpeta qué existe ya) y se vuelve
@@ -1077,8 +1118,8 @@ public partial class Ventana
         }
         if (casilla is null)
         {
-            ranuras[x.Empleado.Cuil] = new(acciones, debajo, despliegue, nombre.Text, null);
-            return new StackPanel { Children = { ConPrevia(izquierda, Hojas(hojas, leyenda), acciones, x.Firmado.Count > 0 ? "Ver el recibo" : "Ver el recibo sin firmar"), despliegue } };
+            ranuras[x.Empleado.Cuil] = new(acciones, debajo, despliegue, nombre.Text, null, null);
+            return new StackPanel { Children = { ConPrevia(izquierda, Hojas(hojas, leyenda), acciones, x.Firmado.Count > 0 ? "Ver el recibo" : "Ver el recibo sin firmar", grupo: Derecha), despliegue } };
         }
 
         // Tildada la casilla, aparece a su lado una lupita: muestra cómo quedarían las iniciales. Destildarla guarda las dos.
@@ -1112,8 +1153,8 @@ public partial class Ventana
             if (viendo) await VerIniciales(cajaIniciales, hojaSinFirmar, viendo = false);
         };
         var derecha = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top, Children = { casilla, lupa, acciones } };
-        ranuras[x.Empleado.Cuil] = new(acciones, debajo, despliegue, nombre.Text, lupaGlifo);
-        return new StackPanel { Children = { ConPrevia(izquierda, Hojas(hojas, leyenda), derecha, "Ver el recibo sin firmar"), despliegue } };
+        ranuras[x.Empleado.Cuil] = new(acciones, debajo, despliegue, nombre.Text, lupaGlifo, casilla);
+        return new StackPanel { Children = { ConPrevia(izquierda, Hojas(hojas, leyenda), derecha, "Ver el recibo sin firmar", grupo: Derecha), despliegue } };
     }
 
     // Al tildar «Firmar iniciales», cómo quedarían: un recorte ampliado de la zona de la firma, armado con lo mismo que
@@ -1160,12 +1201,12 @@ public partial class Ventana
     // Lo que se toca se agranda en el lugar: debajo aparece lo que trae «cargar» (el recibo, cómo va a quedar), a lo
     // ancho del panel. Otro toque lo guarda. «derecha» va al costado y fuera del botón (la casilla de iniciales).
     FrameworkElement ConPrevia(FrameworkElement contenido, Func<Task<List<UIElement>>>? cargar, FrameworkElement? derecha = null,
-        string tooltip = "Ver el recibo", double aire = 3)
+        string tooltip = "Ver el recibo", double aire = 3, string? grupo = null)
     {
         var grilla = new Grid
         {
             Margin = new(0, aire, 0, aire),
-            ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition { Width = GridLength.Auto } },
+            ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition { Width = GridLength.Auto, SharedSizeGroup = grupo } },
             RowDefinitions = { new RowDefinition { Height = GridLength.Auto }, new RowDefinition { Height = GridLength.Auto } },
         };
         if (derecha is not null)

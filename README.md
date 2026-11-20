@@ -78,10 +78,17 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   lo busca por el nombre, en el texto o en el nombre del archivo. Si se lee con
   uno o dos dígitos cambiados, como pasa en las fotos movidas, alcanza con que
   también esté el nombre. Los que encuentra así quedan marcados «ilegible,
-  revisar», y en la lista de clientes dice cuántos hay.
+  revisar», y en la lista de clientes dice cuántos hay. Una hoja escaneada puede
+  traer dos recibos: cada empleado se busca por su cuenta. Y si el escaneo ya
+  trae el texto que le puso el escáner, que suele leer peor, la app lo vuelve a
+  leer con su OCR cuando ese texto no alcanza para encontrar a todos.
 - Un renglón por cliente, con los que tienen faltantes arriba. Al tocarlo, a la
   derecha se abre un panel con sus empleados y los archivos en los que no
   encontró a nadie de la nómina (una baja, un DNI, una foto ilegible).
+- Si un cliente no mandó ningún recibo firmado, el panel lo avisa y ofrece
+  armarlos todos con las iniciales del estudio sobre los recibos originales. Es
+  un último recurso, para cuando ya no hay tiempo de volver a pedirlos: cada uno
+  se puede mirar antes de guardar, y en la lista quedan como «con iniciales».
 - Lo leído se recuerda: la segunda revisión lee solo lo nuevo.
 - La carpeta de los clientes se elige una sola vez y queda guardada en esa PC. Si
   su ruta nombra el año, al pasar a otro año la app busca la del año nuevo.

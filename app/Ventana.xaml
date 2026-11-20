@@ -391,7 +391,8 @@
                             </Grid>
                             <ScrollViewer x:Name="panelDesplazar" Grid.Row="1" Padding="16,0,12,8"
                                           VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                <StackPanel x:Name="panelLista">
+                                <!-- Alcance del grupo «Derecha»: la columna de las casillas mide lo mismo en todos los renglones. -->
+                                <StackPanel x:Name="panelLista" Grid.IsSharedSizeScope="True">
                                     <StackPanel.RenderTransform>
                                         <TranslateTransform x:Name="panelListaCorrida"/>
                                     </StackPanel.RenderTransform>
