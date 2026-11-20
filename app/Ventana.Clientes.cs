@@ -1040,6 +1040,15 @@ public partial class Ventana
             Grupo(Carpeta, g.Key, "Enderezamos estos firmados y les subimos el contraste:", g, e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
         foreach (var g in items.Where(e => e.Accion == Accion.Iniciales).GroupBy(DondeVa))
             Grupo(Carpeta, g.Key, "Firmamos con las iniciales del estudio:", g, Quien);
+        foreach (var e in items.Where(e => e.Accion == Accion.Consolidado))
+        {
+            // Quiénes están en las hojas que se agregan; si el consolidado ya tiene a alguien, se dice a quiénes se suma.
+            var suman = r.Renglones.Where(x => x.Firmado.Any(h => e.Hojas.Any(o => o.Hoja == h.Hoja && o.Ruta == h.Ruta))).ToList();
+            var completa = r.Renglones.Any(x => x.Firmado.Any(h => h.Ruta.Equals(e.Ruta, StringComparison.OrdinalIgnoreCase)));
+            var hojas = e.Hojas.Count == 1 ? "1 hoja" : $"{e.Hojas.Count} hojas";
+            Grupo(Hoja, Path.GetFileNameWithoutExtension(e.Ruta), completa ? "Le sumamos al final los que le faltaban:" : "Juntamos todos los firmados en un PDF:", [e],
+                _ => completa ? $"{string.Join(", ", suman.Select(x => x.Nombre))} ({hojas})" : $"{(suman.Count == 1 ? "1 recibo" : $"{suman.Count} recibos")} en {hojas}");
+        }
         foreach (var e in items.Where(e => e.Accion == Accion.Lista))
             Grupo(Hoja, Path.GetFileNameWithoutExtension(e.Ruta), "", [e], _ => "La lista de los que faltan");
     }
@@ -1048,14 +1057,10 @@ public partial class Ventana
     // texto de la lista. Lo arma el mismo código que después lo guarda.
     static Func<Task<List<UIElement>>>? ComoQueda(Revision r, Escritura e) => e.Accion switch
     {
-        Accion.Corregido => async () =>
+        Accion.Corregido or Accion.Consolidado => async () =>
         {
             var lista = new List<UIElement>();
-            foreach (var h in e.Hojas.Take(3))
-            {
-                var (jpeg, _, _) = await Task.Run(() => WindowsOcr.Corregir(h));
-                lista.Add(Imagen(DesdeJpeg(jpeg)));
-            }
+            foreach (var h in e.Hojas.Take(3)) lista.Add(Imagen(DesdeJpeg(await Task.Run(() => ComoSeGuarda(h)))));
             return lista;
         },
         Accion.Iniciales => async () => [Imagen(await Task.Run(() => RecorteDeLaFirma(e.Hojas[0])), () => AbrirConIniciales(e.Hojas[0]), maxAlto: 220)],
@@ -1067,6 +1072,14 @@ public partial class Ventana
         },
         _ => null,
     };
+
+    // Una foto o un escaneo, derecho y con contraste; un PDF hecho en la computadora, tal cual.
+    static async Task<byte[]> ComoSeGuarda(Hallazgo h)
+    {
+        if (Clientes.SeCorrige(h)) return (await WindowsOcr.Corregir(h)).Jpeg;
+        var (px, ancho, alto) = await WindowsOcr.Cargar(h.Ruta, h.Hoja, 2400);
+        return await WindowsOcr.Jpeg(px, ancho, alto);
+    }
 
     static BitmapSource DesdeJpeg(byte[] jpeg)
     {
@@ -1141,7 +1154,7 @@ public partial class Ventana
         var (glifo, color, nota, explica) = x.Firma switch
         {
             Firma.Firmado => (Tilde, Verde, ConBaja(""), baja is null ? "Firmado: su recibo firmado está con los firmados" : "Se fue en el mes: su liquidación final volvió firmada"),
-            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo. Hasta que se lea su CUIL, su recibo no se guarda corregido"),
+            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo. Su recibo se guarda igual, y sigue para revisar hasta que se lea su CUIL"),
             Firma.ConIniciales => (Lapiz, Violeta, ConBaja("con las iniciales del estudio"), "No volvió firmado: tiene las iniciales del estudio"),
             _ when FaltaElRecibo(x) => (Cruz, Rojo, ConBaja($"{(baja is null ? "falta el recibo" : "falta la liquidación final")} · CUIL {x.Empleado.Cuil}"),
                 baja is null ? "Falta el recibo: no está ni firmado ni sin firmar" : "Se fue en el mes: su recibo es la liquidación final, y no está ni firmada ni sin firmar"),
@@ -1554,6 +1567,7 @@ public partial class Ventana
         {
             Cuantos(Accion.Corregido, "1 firmado corregido", "firmados corregidos"),
             Cuantos(Accion.Iniciales, "1 con iniciales", "con iniciales"),
+            Cuantos(Accion.Consolidado, "1 consolidado", "consolidados"),
             Cuantos(Accion.Lista, "1 lista de faltantes", "listas de faltantes"),
             Cuantos(Accion.Carpeta, "1 carpeta nueva", "carpetas nuevas"),
         }.Where(s => s.Length > 0);

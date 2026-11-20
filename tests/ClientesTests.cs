@@ -419,10 +419,10 @@ public class ClientesTests(ITestOutputHelper salida)
             Assert.All(plan, e => Assert.False(File.Exists(e.Ruta)));
             Assert.Equal(
             [
-                // A Rojas se lo encontró solo por el nombre: su foto no se guarda corregida. Ese PDF llevaría su CUIL y,
-                // en la revisión siguiente, pasaría por firmado sin que nadie hubiera mirado la suposición.
                 (Accion.Corregido, "GOMEZ LUCIA 10 2026.pdf"),
+                (Accion.Corregido, "ROJAS PABLO 10 2026.pdf"), // encontrado solo por el nombre: se guarda igual
                 (Accion.Iniciales, "LOPEZ ANA 10 2026.pdf"), // Ruiz no tiene recibo sin firmar: no hay sobre qué estampar
+                (Accion.Consolidado, "PEREZ JUAN RECIBOS FIRMADOS 10 2026.pdf"), // los dos firmados, sin la de las iniciales
                 (Accion.Lista, "FALTAN RECIBOS FIRMADOS 10 2026.txt"),
             ], plan.Select(e => (e.Accion, Path.GetFileName(e.Ruta))));
             // Todo va a los firmados: el PDF sin firmar de todos juntos es el que el estudio le manda al cliente, y no se
@@ -434,18 +434,26 @@ public class ClientesTests(ITestOutputHelper salida)
             Corregir corregir = h => Task.FromResult((jpeg, 8, 6));
             foreach (var e in plan.Where(e => e.Accion != Accion.Lista)) await Clientes.Escribir(e, r, corregir);
 
-            using (var d = PdfDocument.Open(plan[1].Ruta))
+            var iniciales = plan.Single(e => e.Accion == Accion.Iniciales);
+            using (var d = PdfDocument.Open(iniciales.Ruta))
             {
                 Assert.Contains("iniciales", d.Information.Keywords);
                 Assert.Contains("L.A.", string.Join(" ", d.GetPage(1).GetWords().Select(w => w.Text)));
             }
             using (var d = PdfDocument.Open(plan[0].Ruta)) Assert.Equal(1, d.NumberOfPages);
+            using (var d = PdfDocument.Open(plan.Single(e => e.Accion == Accion.Consolidado).Ruta))
+            {
+                Assert.Equal(2, d.NumberOfPages);
+                Assert.Contains($"CUIL {Gomez.Cuil}", Palabras(d.GetPage(1)));
+                Assert.Contains($"POR NOMBRE {Rojas.Cuil}", Palabras(d.GetPage(2)));
+            }
 
             // Si mientras tanto apareció el archivo, falla en vez de pisarlo.
-            await Assert.ThrowsAsync<IOException>(() => Clientes.Escribir(plan[1], r, corregir));
+            await Assert.ThrowsAsync<IOException>(() => Clientes.Escribir(iniciales, r, corregir));
 
             // La lista se escribe con el cliente revisado de nuevo: López ya tiene las iniciales del estudio, y Rojas
-            // sigue para revisar, también en la lista.
+            // sigue para revisar, también en la lista. Su PDF guardado lleva su CUIL en las palabras clave, pero lo puso
+            // la app: no lo vuelve firmado.
             var nueva = await Clientes.Revisar(cliente, 10, 2026, null, Leer, memoria, _ => { }, CancellationToken.None);
             Assert.Equal([Firma.Firmado, Firma.PorNombre, Firma.ConIniciales, Firma.Falta], nueva.Renglones.Select(x => x.Firma));
             await Clientes.Escribir(plan[^1], nueva, corregir);
@@ -566,6 +574,95 @@ public class ClientesTests(ITestOutputHelper salida)
     }
 
     [Fact]
+    public async Task Separa_tambien_las_hojas_escaneadas_que_traen_texto_propio()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var mes = Path.Combine(cliente, "4. SUELDOS Y CARGAS SOCIALES", "1  LIQUIDACIONES DE SUELDOS 2026", "PEREZ JUAN SUELDOS OCTUBRE 2026");
+            var firmados = Directory.CreateDirectory(Path.Combine(mes, "RECIBOS FIRMADOS OCTUBRE")).FullName;
+            // Dos recibos por hoja.
+            Escaneo(Path.Combine(firmados, "CLIENTE RECIBOS 10 2026.pdf"), $"FIRMA DEL EMPLEADO {Gomez.Cuil} {Rojas.Cuil}");
+            // Y uno hecho en la computadora: ese ya está bien como está.
+            Pdf(Path.Combine(firmados, "LOPEZ DIGITAL.pdf"), Recibo(Lopez));
+
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, null, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            Assert.Equal([Firma.Firmado, Firma.Firmado, Firma.Firmado], r.Renglones.Where(x => x.Empleado != Ruiz).Select(x => x.Firma));
+            var corregidos = Clientes.Planear(r, new HashSet<string>()).Where(e => e.Accion == Accion.Corregido).Select(e => e.Empleado).ToList();
+            Assert.Equal([Gomez, Rojas], corregidos);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    // Como Adobe Scan: en cada hoja, la foto de la hoja entera con el texto que leyó por encima.
+    static void Escaneo(string ruta, params string[] hojas)
+    {
+        var b = new PdfDocumentBuilder();
+        var fuente = b.AddStandard14Font(Standard14Font.Helvetica);
+        foreach (var texto in hojas)
+        {
+            var p = b.AddPage(PageSize.A4);
+            p.AddJpeg(Convert.FromBase64String(Jpeg), new PdfRectangle(0, 0, p.PageSize.Width, p.PageSize.Height));
+            p.AddText(texto, 8, new PdfPoint(40, 400), fuente);
+        }
+        File.WriteAllBytes(ruta, b.Build());
+    }
+
+    [Fact]
+    public async Task El_consolidado_se_completa_sin_tocar_lo_que_tenia()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var mes = Path.Combine(cliente, "4. SUELDOS Y CARGAS SOCIALES", "1  LIQUIDACIONES DE SUELDOS 2026", "PEREZ JUAN SUELDOS OCTUBRE 2026");
+            var firmados = Directory.CreateDirectory(Path.Combine(mes, "RECIBOS FIRMADOS OCTUBRE")).FullName;
+            // El consolidado que armó el estudio, con el nombre de siempre, trae a dos. López llega después en un PDF hecho
+            // en la computadora, y Ruiz en una foto donde se lo encuentra solo por el nombre.
+            var consolidado = Path.Combine(firmados, "PEREZ JUAN RECIBOS FIRMADOS 10 2026.pdf");
+            Escaneo(consolidado, $"FIRMA DEL EMPLEADO {Gomez.Cuil} {Rojas.Cuil}");
+            Pdf(Path.Combine(firmados, "LOPEZ DIGITAL.pdf"), Recibo(Lopez));
+            File.WriteAllBytes(Path.Combine(firmados, "foto.jpeg"), [0xFF, 0xD8]);
+            LeerImagen foto = (ruta, _, _) => Path.GetFileName(ruta) == "foto.jpeg"
+                ? Task.FromResult(new Lectura("APELLIDO Y NOMBRE RUIZ, LUIS", Ocr: true))
+                : throw new InvalidOperationException($"no debería leer {Path.GetFileName(ruta)} con OCR");
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, foto, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal([Firma.Firmado, Firma.Firmado, Firma.Firmado, Firma.PorNombre], r.Renglones.Select(x => x.Firma));
+
+            // Se completa con los dos que le faltan, en el orden de los recibos sin firmar.
+            var e = Clientes.Planear(r, new HashSet<string>()).Single(e => e.Accion == Accion.Consolidado);
+            Assert.Equal(consolidado, e.Ruta);
+            Assert.Equal(["LOPEZ DIGITAL.pdf", "foto.jpeg"], e.Hojas.Select(h => Path.GetFileName(h.Ruta)));
+            await Clientes.Escribir(e, r, _ => Task.FromResult((Convert.FromBase64String(Jpeg), 2, 2)));
+            Assert.False(File.Exists(consolidado + ".nuevo"));
+            using (var d = PdfDocument.Open(consolidado))
+            {
+                Assert.Equal(3, d.NumberOfPages);
+                // La hoja que tenía sigue con su imagen y su texto; la de López, tal cual; la foto, derecha y con quién es.
+                Assert.Single(d.GetPage(1).GetImages());
+                Assert.Contains("FIRMA DEL EMPLEADO", Palabras(d.GetPage(1)));
+                Assert.Contains("SUELDO NETO", Palabras(d.GetPage(2)));
+                Assert.Contains($"POR NOMBRE {Ruiz.Cuil} RUIZ LUIS", Palabras(d.GetPage(3)));
+            }
+
+            // La revisión siguiente lo lee sin OCR, Ruiz sigue para revisar y ya no hay nada que sumarle.
+            var despues = await Clientes.Revisar(cliente, 10, 2026, null, foto, memoria, _ => { }, CancellationToken.None);
+            Assert.Empty(despues.Avisos);
+            Assert.Equal(r.Renglones.Select(x => x.Firma), despues.Renglones.Select(x => x.Firma));
+            Assert.All(despues.Renglones.Where(x => x.Firma != Firma.Falta), x => Assert.Contains(x.Firmado, h => h.Ruta == consolidado));
+            Assert.DoesNotContain(Clientes.Planear(despues, new HashSet<string>()), e => e.Accion == Accion.Consolidado);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    static string Palabras(Page p) => string.Join(" ", p.GetWords().Select(w => w.Text));
+
+    // Un JPEG blanco de 2 por 2: alcanza para que el PDF tenga una imagen.
+    const string Jpeg = "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAqADAAQAAAABAAAAAgAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAgACAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A/fyiiigD/9k=";
+
+    [Fact]
     public async Task Crea_la_carpeta_de_firmados_solo_si_hay_que_guardar_algo()
     {
         var raiz = Directory.CreateTempSubdirectory().FullName;
@@ -596,6 +693,7 @@ public class ClientesTests(ITestOutputHelper salida)
             LeerImagen sinCuil = (_, _, _) => Task.FromResult(new Lectura("APELLIDO Y NOMBRE GOMEZ, LUCIA", Ocr: true));
             var conFoto = await Clientes.Revisar(cliente, 10, 2026, null, sinCuil, memoria, _ => { }, CancellationToken.None);
             Assert.Equal(Firma.PorNombre, conFoto.Renglones[0].Firma);
+            // Su nombre de archivo ya lo tiene la copia con iniciales, y eso no se pisa.
             Assert.DoesNotContain(Clientes.Planear(conFoto, new HashSet<string>()), e => e.Accion == Accion.Corregido);
         }
         finally
@@ -720,10 +818,13 @@ public class ClientesTests(ITestOutputHelper salida)
         {
             var r = await Clientes.Revisar(cliente, 10, 2026, ocr, rapido, memoria, _ => { }, CancellationToken.None);
             var fotos = r.Renglones.SelectMany(x => x.Firmado).Count(h => h.Lectura.Ocr);
+            var plan = Clientes.Planear(r, new HashSet<string>());
             salida.WriteLine($"{r.Cliente}: nómina {r.Nomina?.Empleados.Count}, firmados {(r.Firmados is null ? "-" : Path.GetFileName(r.Firmados))}, " +
                 $"faltan {r.Faltan}, por nombre {r.Renglones.Count(x => x.Firma == Firma.PorNombre)}, hojas leídas con OCR {fotos}, " +
                 $"giros {string.Join(",", r.Renglones.SelectMany(x => x.Firmado).Where(h => h.Lectura.Ocr).Select(h => h.Lectura.Giro))}, " +
-                $"sin leer {r.Ilegibles.Count} ({string.Join(", ", r.Ilegibles.GroupBy(h => Path.GetExtension(h.Ruta).ToLowerInvariant() + (h.Hoja > 0 ? " escaneado" : " foto")).Select(g => $"{g.Count()} {g.Key}"))}), avisos {string.Join(" | ", r.Avisos)}");
+                $"sin leer {r.Ilegibles.Count} ({string.Join(", ", r.Ilegibles.GroupBy(h => Path.GetExtension(h.Ruta).ToLowerInvariant() + (h.Hoja > 0 ? " escaneado" : " foto")).Select(g => $"{g.Count()} {g.Key}"))}), " +
+                $"guardaría {plan.Count(e => e.Accion == Accion.Corregido)} corregidos y {plan.FirstOrDefault(e => e.Accion == Accion.Consolidado)?.Hojas.Count ?? 0} hojas " +
+                $"del consolidado, avisos {string.Join(" | ", r.Avisos)}");
         }
 
     }

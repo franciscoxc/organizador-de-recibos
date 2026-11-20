@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Fonts.Standard14Fonts;
 using UglyToad.PdfPig.Writer;
 
 // Lo que dijo de una hoja (o de una foto) el texto del PDF o el OCR. Del OCR quedan también el giro y la
@@ -43,7 +44,7 @@ public record Revision(string Cliente, int Mes, int Anio, string? CarpetaMes, No
     public int Faltan => Renglones.Count(r => r.Firma == Firma.Falta);
 }
 
-public enum Accion { Carpeta, Corregido, Iniciales, Lista }
+public enum Accion { Carpeta, Corregido, Iniciales, Consolidado, Lista }
 
 public record Escritura(Accion Accion, string Ruta, Empleado? Empleado, List<Hallazgo> Hojas);
 
@@ -474,6 +475,14 @@ public static class Clientes
                     cuils.Add(q.Cuil);
                     porNombre.Add((h, q.Cuil));
                 }
+                // Lo que la app guardó encontrado por el nombre sigue así: ese CUIL lo puso ella, no se leyó. Hasta que
+                // aparezca en el texto (la lectura a fondo de la copia derecha puede leerlo).
+                if (e.Claves.Contains("por nombre"))
+                    foreach (var c in cuils.Except(DeLaNomina(h.Lectura.Texto, porCuil.Keys))) porNombre.Add((h, c));
+                // En el consolidado que arma la app, los encontrados solo por el nombre llevan «POR NOMBRE» delante del
+                // CUIL: también ese lo escribió ella.
+                foreach (Match m in Regex.Matches(h.Lectura.Texto, @"POR NOMBRE (\S+)"))
+                    foreach (var c in DeLaNomina(m.Groups[1].Value, cuils)) porNombre.Add((h, c));
                 if (cuils.Count == 0)
                 {
                     ilegibles.Add(h);
@@ -556,7 +565,8 @@ public static class Clientes
 
     static string RutaLista(string firmados, Revision r) => Path.Combine(firmados, $"FALTAN RECIBOS FIRMADOS {r.Mes:00} {r.Anio}.txt");
 
-    /// <summary>Lo que se guardaría en la carpeta del cliente. Nunca un archivo que ya existe. La única carpeta que
+    /// <summary>Lo que se guardaría en la carpeta del cliente. Nunca un archivo que ya existe, salvo el consolidado, que se
+    /// completa con los que le faltan. La única carpeta que
     /// puede crear es la de los firmados del mes, y solo si hay recibos para poner adentro. Las iniciales, solo
     /// para los que eligió el usuario entre los que no tienen el firmado.</summary>
     public static List<Escritura> Planear(Revision r, IReadOnlySet<string> conIniciales)
@@ -573,11 +583,13 @@ public static class Clientes
 
         foreach (var x in r.Renglones)
         {
-            // Los firmados que llegaron en foto o escaneados: un PDF por empleado, derecho y con contraste. Los
-            // encontrados solo por el nombre, no: ese PDF lleva su CUIL adentro y en la revisión siguiente contaba como
-            // firmado de verdad, sin que nadie hubiera mirado la suposición.
-            var imagenes = x.Firmado.Where(h => h.Lectura.Ocr).ToList();
-            if (x.Firma != Firma.PorNombre && imagenes.Count > 0 && Libre(Archivo(firmados, x, r)))
+            // Los firmados que llegaron en foto o escaneados: un PDF por empleado, derecho y con contraste. También los
+            // encontrados solo por el nombre: su PDF lleva la marca «por nombre» y sigue para revisar (ver Escribir).
+            // ponytail-keep: también las hojas escaneadas que traen texto propio. Con solo las del OCR de la app, de un
+            // PDF de Adobe Scan con siete recibos (octubre 2026) se guardaron dos, los de la hoja que hubo que leer a
+            // fondo, y los otros cinco quedaron en verde con «nada para guardar».
+            var imagenes = x.Firmado.Where(SeCorrige).ToList();
+            if (imagenes.Count > 0 && Libre(Archivo(firmados, x, r)))
                 plan.Add(new(Accion.Corregido, Archivo(firmados, x, r), x.Empleado, imagenes));
 
             // Las iniciales del estudio, sobre el recibo sin firmar del PDF con menos empleados (el suelto, si está).
@@ -590,6 +602,28 @@ public static class Clientes
             // no se separan ni se tocan, solo se leen (a quién le falta la firma, y la base de la copia con iniciales).
             // Todo lo que se guarda va a la carpeta de los firmados, que es lo que manda el cliente.
         }
+
+        // El consolidado: los recibos que firmó cada empleado, juntos en «CLIENTE RECIBOS FIRMADOS 10 2026.pdf» (las
+        // copias con las iniciales del estudio no van). Si ya está y tiene a todos, no se toca. Si le falta alguien, se
+        // completa: lo que tenía queda igual y lo que faltaba va al final.
+        var consolidado = Consolidado(firmados, r);
+        bool EnElConsolidado(Hallazgo h) => h.Ruta.Equals(consolidado, StringComparison.OrdinalIgnoreCase);
+        var empleadosPorArchivo = r.Renglones.SelectMany(x => x.Firmado.Select(h => (h.Ruta, x.Empleado.Cuil))).Distinct()
+            .GroupBy(t => t.Ruta, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        // En el orden de los recibos sin firmar de todos juntos, que es el de la hoja que firmaron.
+        var todos = empleadosPorPdf.Count > 0 ? empleadosPorPdf.MaxBy(p => p.Value).Key : null;
+        var nuevas = r.Renglones
+            .Where(x => x.Firma is Firma.Firmado or Firma.PorNombre && !x.Firmado.Any(EnElConsolidado))
+            .OrderBy(x => x.SinFirmar.FirstOrDefault(h => h.Ruta == todos)?.Hoja ?? int.MaxValue)
+            // De cada uno, la hoja del archivo con más empleados (el escaneo de todos juntos) antes que su archivo suelto,
+            // que suele ser una copia de esa hoja: así una hoja con dos recibos va una sola vez.
+            .Select(x => x.Firmado.Where(h => !EnElConsolidado(h)).OrderByDescending(h => empleadosPorArchivo[h.Ruta])
+                .ThenBy(h => h.Ruta.Equals(Archivo(firmados, x, r), StringComparison.OrdinalIgnoreCase)).First())
+            // Pero un escaneo, con sus hojas como vinieron: el cliente no las escanea en el orden de los sin firmar, y
+            // con el de los sin firmar, el de un cliente de octubre 2026 salía con las hojas 1, 4, 2 y 3.
+            .GroupBy(h => h.Ruta, StringComparer.OrdinalIgnoreCase).SelectMany(g => g.OrderBy(h => h.Hoja))
+            .DistinctBy(h => (h.Ruta, h.Hoja)).ToList();
+        if (nuevas.Count > 0) plan.Add(new(Accion.Consolidado, consolidado, null, nuevas));
 
         // La carpeta de los firmados se crea solo si hay recibos para guardar en ella, y antes que ellos.
         var crear = r.Firmados is null && plan.Any(p => p.Ruta.StartsWith(firmados + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
@@ -606,6 +640,26 @@ public static class Clientes
                 plan.Add(new(Accion.Lista, ruta, null, []));
         }
         return plan;
+    }
+
+    public static string Consolidado(string firmados, Revision r) => Path.Combine(firmados, $"{r.Cliente} RECIBOS FIRMADOS {r.Mes:00} {r.Anio}.pdf");
+
+    /// <summary>Si la hoja se guarda derecha y con contraste (una foto o un escaneo) o tal cual (un PDF hecho en la
+    /// computadora, o la copia con las iniciales).</summary>
+    public static bool SeCorrige(Hallazgo h) => h.Lectura.Ocr || Escaneada(h);
+
+    // Una hoja de PDF que es una foto con el texto por encima (lo que arman Adobe Scan y los escáneres): las imágenes
+    // cubren más de la mitad de la hoja. Un recibo hecho en la computadora, a lo sumo trae un logo.
+    static bool Escaneada(Hallazgo h)
+    {
+        if (h.Hoja == 0) return false;
+        try
+        {
+            using var doc = PdfDocument.Open(h.Ruta);
+            var p = doc.GetPage(h.Hoja);
+            return p.GetImages().Sum(i => i.BoundingBox.Area) > 0.5 * p.Width * p.Height;
+        }
+        catch { return false; } // si no se puede abrir, se queda como está
     }
 
     static bool EsNuestra(string ruta)
@@ -674,7 +728,8 @@ public static class Clientes
     }
 
     /// <summary>Escribe una cosa del plan. Con CreateNew: si mientras tanto apareció un archivo con ese nombre,
-    /// falla en vez de pisarlo. La lista es lo único que se reemplaza, y solo si la escribió la app.</summary>
+    /// falla en vez de pisarlo. Lo único que se reemplaza es la lista, si la escribió la app, y el consolidado, que se
+    /// completa sin cambiar lo que tenía.</summary>
     public static async Task Escribir(Escritura e, Revision r, Corregir corregir)
     {
         var carpeta = Path.GetDirectoryName(e.Ruta)!;
@@ -693,10 +748,20 @@ public static class Clientes
             return;
         }
 
+        if (e.Accion == Accion.Consolidado)
+        {
+            await Consolidar(e, r, corregir);
+            return;
+        }
+
         var b = new PdfDocumentBuilder();
         // El CUIL y el período en las palabras clave: la próxima revisión lo encuentra sin OCR. «iniciales» marca
-        // los que llevan las del estudio, para no contarlos como firmados por el empleado.
-        b.DocumentInformation.Keywords = $"{e.Empleado!.Cuil} {r.Mes:00}/{r.Anio}" + (e.Accion == Accion.Iniciales ? " iniciales" : "");
+        // los que llevan las del estudio, para no contarlos como firmados por el empleado. «por nombre», los que se
+        // encontraron solo por el nombre: sin la marca, el CUIL de las palabras clave lo volvía firmado de verdad en
+        // la revisión siguiente, sin que nadie hubiera mirado la suposición.
+        var porNombre = r.Renglones.Any(x => x.Empleado == e.Empleado && x.Firma == Firma.PorNombre);
+        b.DocumentInformation.Keywords = $"{e.Empleado!.Cuil} {r.Mes:00}/{r.Anio}" + (e.Accion == Accion.Iniciales ? " iniciales" : "")
+            + (porNombre ? " por nombre" : "");
         var docs = new Dictionary<string, PdfDocument>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -705,14 +770,7 @@ public static class Clientes
             {
                 if (e.Accion == Accion.Corregido)
                 {
-                    var (jpeg, ancho, alto) = await corregir(h);
-                    // Entera, centrada y con un margen chico, en una hoja A4 parada o acostada como la foto.
-                    var parada = alto >= ancho;
-                    var pagina = b.AddPage(PageSize.A4, parada);
-                    double pw = parada ? 595 : 842, ph = parada ? 842 : 595, margen = 18;
-                    var escala = Math.Min((pw - 2 * margen) / ancho, (ph - 2 * margen) / alto);
-                    double w = ancho * escala, hh = alto * escala, x = (pw - w) / 2, y = (ph - hh) / 2;
-                    pagina.AddJpeg(jpeg, new PdfRectangle(x, y, x + w, y + hh));
+                    await HojaCorregida(b, h, corregir);
                     continue;
                 }
                 // Las iniciales: una copia de la hoja sin firmar, con las del estudio en el espacio de la firma. El
@@ -731,6 +789,78 @@ public static class Clientes
         finally
         {
             foreach (var d in docs.Values) d.Dispose();
+        }
+    }
+
+    // Entera, centrada y con un margen chico, en una hoja A4 parada o acostada como la foto.
+    static async Task<PdfPageBuilder> HojaCorregida(PdfDocumentBuilder b, Hallazgo h, Corregir corregir)
+    {
+        var (jpeg, ancho, alto) = await corregir(h);
+        var parada = alto >= ancho;
+        var pagina = b.AddPage(PageSize.A4, parada);
+        double pw = parada ? 595 : 842, ph = parada ? 842 : 595, margen = 18;
+        var escala = Math.Min((pw - 2 * margen) / ancho, (ph - 2 * margen) / alto);
+        double w = ancho * escala, hh = alto * escala, x = (pw - w) / 2, y = (ph - hh) / 2;
+        pagina.AddJpeg(jpeg, new PdfRectangle(x, y, x + w, y + hh));
+        return pagina;
+    }
+
+    // El consolidado se arma aparte, y recién entero reemplaza al que había: si algo falla, queda como estaba. Lo que ya
+    // tenía va primero, hoja por hoja tal cual; lo que faltaba, al final.
+    static async Task Consolidar(Escritura e, Revision r, Corregir corregir)
+    {
+        var b = new PdfDocumentBuilder();
+        // Sin los CUIL: en las palabras clave valdrían para todas las hojas. Quién está en cada una va en la hoja misma.
+        b.DocumentInformation.Keywords = $"{r.Mes:00}/{r.Anio} consolidado";
+        var fuente = b.AddStandard14Font(Standard14Font.Helvetica);
+        var docs = new Dictionary<string, PdfDocument>(StringComparer.OrdinalIgnoreCase);
+        PdfDocument Abrir(string ruta) => docs.TryGetValue(ruta, out var d) ? d : docs[ruta] = PdfDocument.Open(ruta);
+        // Quién está en la hoja, en texto invisible: la próxima revisión lo lee sin OCR, en esta PC o en otra, y con
+        // Ctrl+F se encuentra a cualquiera. Sin el CUIL de todos, al que el OCR no encontrara en la hoja se lo volvía a
+        // agregar en cada guardado. Los encontrados solo por el nombre llevan «POR NOMBRE»: siguen para revisar.
+        void Quienes(PdfPageBuilder p, string ruta, int hoja)
+        {
+            var texto = string.Join(" ", r.Renglones
+                .Where(x => x.Firmado.Any(h => h.Hoja == hoja && h.Ruta.Equals(ruta, StringComparison.OrdinalIgnoreCase)))
+                .Select(x => $"{(x.Firma == Firma.PorNombre ? "POR NOMBRE" : "CUIL")} {x.Empleado.Cuil} {Regex.Replace(Normal(x.Empleado.Nombre), "[^A-Z ]", "")}"));
+            if (texto.Length == 0) return;
+            p.SetTextRenderingMode(TextRenderingMode.Neither);
+            p.AddText(texto, 4, new PdfPoint(20, 20), fuente);
+        }
+        var existe = File.Exists(e.Ruta);
+        var antes = 0;
+        byte[] pdf;
+        try
+        {
+            if (existe)
+            {
+                var viejo = Abrir(e.Ruta);
+                antes = viejo.NumberOfPages;
+                for (var i = 1; i <= antes; i++) Quienes(b.AddPage(viejo, i), e.Ruta, i);
+            }
+            foreach (var h in e.Hojas)
+                Quienes(SeCorrige(h) ? await HojaCorregida(b, h, corregir) : b.AddPage(Abrir(h.Ruta), h.Hoja), h.Ruta, h.Hoja);
+            pdf = b.Build();
+        }
+        finally
+        {
+            // Cerrados antes de reemplazar el viejo, que es uno de ellos.
+            foreach (var d in docs.Values) d.Dispose();
+        }
+        using (var nuevo = PdfDocument.Open(pdf))
+            if (nuevo.NumberOfPages != antes + e.Hojas.Count) throw new IOException("el consolidado nuevo no salió entero");
+        if (!existe)
+        {
+            await Recibos.GuardarNuevo(e.Ruta, pdf);
+            return;
+        }
+        var aparte = e.Ruta + ".nuevo";
+        await Recibos.GuardarNuevo(aparte, pdf);
+        try { File.Move(aparte, e.Ruta, overwrite: true); }
+        catch
+        {
+            File.Delete(aparte);
+            throw;
         }
     }
 }

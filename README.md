@@ -1,6 +1,6 @@
 # Organizador de Recibos
 
-**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.1/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.1/Organizador.de.Recibos.arm.exe)
+**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.2/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.2/Organizador.de.Recibos.arm.exe)
 
 Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
@@ -115,20 +115,32 @@ clic:
   nombre de siempre, en la carpeta de los firmados. Cuando el nombre cambia (la
   foto se llamaba `IMG_2034.jpg`), un lápiz al lado del empleado lo avisa. La
   foto original queda como estaba, con su nombre. Los que encontró solo por el
-  nombre («ilegible, revisar») no se guardan así: ese PDF llevaría su CUIL y
-  después contaría como firmado, sin que nadie lo hubiera mirado.
+  nombre («ilegible, revisar») también se guardan, con una marca adentro: en la
+  revisión siguiente siguen para revisar, no cuentan como firmados.
+- Las hojas de un PDF escaneado con varios recibos (Adobe Scan, un escáner) se
+  separan igual que las fotos, aunque el PDF traiga su propio texto.
 - Las iniciales del estudio, solo en los recibos que elijas, entre los que no
   volvieron firmados: una copia del recibo sin firmar con las iniciales, en la
   carpeta de los firmados. En la lista quedan como «con iniciales», no como
   firmados.
+- El consolidado, `CLIENTE RECIBOS FIRMADOS MM AAAA.pdf`: todos los recibos que
+  firmaron los empleados, en un PDF, derechos y con contraste (un PDF hecho en la
+  computadora va tal cual). Las copias con iniciales no van. Una hoja con dos
+  recibos va una sola vez, y un escaneo, con sus hojas en el orden en que vino.
+  Si ya existe y tiene a todos, no se toca. Si le falta alguien (una foto que
+  llegó después), se completa: sus hojas quedan como estaban y lo que faltaba va
+  al final. Cada hoja lleva escrito, invisible, quién está en ella: la revisión
+  siguiente lo lee sin OCR, y con Ctrl+F se busca a cualquiera.
 - `FALTAN RECIBOS FIRMADOS MM AAAA.txt`, con los que faltan y los archivos en los
   que no encontró a nadie.
 - La carpeta «RECIBOS FIRMADOS <MES>», solo si hay algo para guardar adentro.
 
 Todo va a la carpeta de los firmados, que es lo que manda el cliente. Los recibos
 sin firmar, los que arma el estudio para mandarle, no se tocan ni se separan: la
-app solo los lee. Nunca reemplaza ni borra un archivo: si ya existe uno con ese
-nombre, lo deja como está. Mientras guarda, la ventana no se cierra: espera a
+app solo los lee. Nunca borra un archivo, y el único que reemplaza es el
+consolidado, al completarlo: lo arma aparte y recién entero ocupa el lugar del
+anterior, así que si algo falla queda el que había. Fuera de eso, si ya existe un
+archivo con ese nombre, lo deja como está. Mientras guarda, la ventana no se cierra: espera a
 terminar, para no dejar un archivo a medio escribir.
 
 ## Descargar
