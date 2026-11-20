@@ -148,15 +148,15 @@ public partial class Ventana : Window
         SacarFichas();
         Estado(files.Length == 1 ? $"Leyendo {Path.GetFileName(files[0])}…" : $"Leyendo {files.Length} PDF…");
         var problems = new List<string>();
-        var r = new Resultado([], [], []);
+        var r = new Resultado([], [], [], []);
         var iniciales = estampar.IsChecked == true; // se lee acá: la casilla no se puede tocar desde otro hilo
         var negado = false;
         try
         {
             // La pregunta se hace en el hilo de la ventana; Procesar espera la respuesta en el suyo.
-            async Task<bool> Permiso(IReadOnlyList<string> rutas)
+            async Task<bool> Permiso(IReadOnlyList<string> rutas, IReadOnlyList<string> combinados)
             {
-                var si = await await Dispatcher.InvokeAsync(() => PedirPermiso(rutas));
+                var si = await await Dispatcher.InvokeAsync(() => PedirPermiso(rutas, combinados));
                 negado = !si;
                 return si;
             }
@@ -166,6 +166,7 @@ public partial class Ventana : Window
             {
                 if (msg.StartsWith('⚠')) problems.Add(msg[2..]);
                 else if (msg.StartsWith('✓')) Separado(msg[2..]);
+                else if (msg.StartsWith('▤')) Juntado(msg[2..]);
                 else Estado(msg);
             }), iniciales: iniciales, permiso: Permiso));
             escribiendo = false; // lo que sigue solo lee: ya se puede cerrar
@@ -212,7 +213,7 @@ public partial class Ventana : Window
         }
 
         // Si dijo que no guardara, no hay nada que avisar: es lo que pidió.
-        if (r.Creados.Count == 0 && r.Nominas.Count == 0 && problems.Count == 0 && !negado) problems.Add("No separé ningún recibo");
+        if (r.Creados.Count == 0 && r.Combinados.Count == 0 && r.Nominas.Count == 0 && problems.Count == 0 && !negado) problems.Add("No separé ningún recibo");
         if (problems.Count == 0) return;
         Avisar(problems.Count == 1 ? problems[0] : $"{problems[0]}\n(y {problems.Count - 1} avisos más)");
         Sacudir();
@@ -258,9 +259,10 @@ public partial class Ventana : Window
 
     // Separar en un disco de esta PC es lo que se pidió al soltar los PDF. Afuera (las carpetas de los clientes están en
     // Z:) nada se escribe sin preguntar: debajo de la tarjeta sale cuántos recibos son y dónde van, y se espera el clic.
-    Task<bool> PedirPermiso(IReadOnlyList<string> rutas)
+    Task<bool> PedirPermiso(IReadOnlyList<string> rutas, IReadOnlyList<string> combinados)
     {
-        if (rutas.FirstOrDefault(FueraDeLaPc) is not { } afuera)
+        var todas = rutas.Concat(combinados).ToList();
+        if (todas.FirstOrDefault(FueraDeLaPc) is not { } afuera)
         {
             escribiendo = true;
             return Task.FromResult(true);
@@ -268,12 +270,17 @@ public partial class Ventana : Window
         var donde = Unidad(afuera, "la carpeta de red");
         var carpeta = Path.GetDirectoryName(afuera)!;
         var madre = Path.GetFileName(Path.GetDirectoryName(carpeta));
-        var otras = rutas.Select(Path.GetDirectoryName).Distinct(StringComparer.OrdinalIgnoreCase).Count() - 1;
-        permisoTitulo.Text = rutas.Count == 1 ? $"¿Guardo 1 recibo en {donde}?" : $"¿Guardo {rutas.Count} recibos en {donde}?";
+        var otras = todas.Select(Path.GetDirectoryName).Distinct(StringComparer.OrdinalIgnoreCase).Count() - 1;
+        // Los combinados aparte: no son recibos, y uno que ya existe se completa, no se crea.
+        var recibos = rutas.Count == 0 ? "" : rutas.Count == 1 ? "1 recibo" : $"{rutas.Count} recibos";
+        var juntos = combinados.Count == 0 ? "" : combinados.Count == 1 ? "el combinado" : $"{combinados.Count} combinados";
+        permisoTitulo.Text = $"¿Guardo {string.Join(" y ", new[] { recibos, juntos }.Where(t => t.Length > 0))} en {donde}?";
         permisoTexto.Text = $"En la carpeta «{Path.GetFileName(carpeta)}»"
             + (string.IsNullOrEmpty(madre) ? "" : $", adentro de «{madre}»")
             + (otras == 0 ? "" : otras == 1 ? ", y en 1 carpeta más" : $", y en {otras} carpetas más")
-            + ". No se reemplaza ningún archivo: lo que ya existe queda como está.";
+            + (combinados.Any(File.Exists)
+                ? ". No se borra nada: lo que ya existe queda como está, y al combinado que le falta alguien solo se le suman hojas al final."
+                : ". No se reemplaza ningún archivo: lo que ya existe queda como está.");
         permisoTexto.ToolTip = carpeta;
         permisoSi.Content = $"Guardar en {donde}";
         permisoCaja.Visibility = Visibility.Visible;
@@ -405,9 +412,24 @@ public partial class Ventana : Window
         Luego((int)espera, () => Volar(f));
     }
 
-    void Volar(Ficha f)
+    // El combinado llega último a la misma ficha, más grueso: son todos juntos. No suma al número, que cuenta recibos.
+    void Juntado(string carpetaYArchivo)
     {
-        var papel = Papel();
+        var f = FichaDe(carpetaYArchivo);
+        if (Resorte.Quieto || volando >= 8)
+        {
+            Resorte.Animar((f, "latido"), 1, v => f.Escala.ScaleX = f.Escala.ScaleY = v, velocidad: 2.5, rigidez: 500, rebote: 0.5);
+            return;
+        }
+        var espera = Math.Max(0, (proximoVuelo - DateTime.Now).TotalMilliseconds);
+        proximoVuelo = DateTime.Now.AddMilliseconds(espera + 70);
+        volando++;
+        Luego((int)espera, () => Volar(f, recibo: false));
+    }
+
+    void Volar(Ficha f, bool recibo = true)
+    {
+        var papel = recibo ? Papel() : Pila();
         capa.Children.Add(papel);
         var desde = icono.TranslatePoint(new Point(icono.ActualWidth / 2, icono.ActualHeight * 0.4), capa);
         var clave = (papel, "t");
@@ -427,8 +449,11 @@ public partial class Ventana : Window
             capa.Children.Remove(papel);
             Resorte.Olvidar(clave);
             volando--;
-            f.Llegados++;
-            Contar(f);
+            if (recibo)
+            {
+                f.Llegados++;
+                Contar(f);
+            }
             // El destino acusa recibo: la ficha late.
             Resorte.Animar((f, "latido"), 1, v => f.Escala.ScaleX = f.Escala.ScaleY = v, velocidad: 2.5, rigidez: 500, rebote: 0.5);
         });
@@ -445,6 +470,21 @@ public partial class Ventana : Window
             new Border { Height = 6, Margin = new(0, 0, 0, 4), VerticalAlignment = VerticalAlignment.Bottom, Background = (Brush)FindResource("Pdf") }
         }
     };
+
+    // El combinado: tres hojas apiladas, corridas apenas.
+    Grid Pila()
+    {
+        var pila = new Grid { Width = 22, Height = 26 };
+        for (var i = 2; i >= 0; i--)
+        {
+            var hoja = Papel();
+            hoja.HorizontalAlignment = HorizontalAlignment.Left;
+            hoja.VerticalAlignment = VerticalAlignment.Top;
+            hoja.Margin = new(i * 2, i * 2, 0, 0);
+            pila.Children.Add(hoja);
+        }
+        return pila;
+    }
 
     // Los números ruedan.
     static void Contar(Ficha f) =>

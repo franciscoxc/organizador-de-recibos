@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Fonts.Standard14Fonts;
 using UglyToad.PdfPig.Writer;
 
 // Coordenadas PDF: origen abajo a la izquierda, en puntos.
@@ -16,8 +17,9 @@ public record Empleado(string Cuil, string Nombre);
 // La nómina de la declaración jurada de AFIP (F.931): quiénes tienen que tener recibo ese mes.
 public record Nomina(string Ruta, int Mes, string Anio, List<Empleado> Empleados);
 
-// YaEstaban: los recibos que ya tenían su archivo de antes. No se reemplazan.
-public record Resultado(List<string> Creados, List<Nomina> Nominas, List<string> YaEstaban);
+// YaEstaban: los recibos que ya tenían su archivo de antes. No se reemplazan. Combinados: los PDF con todos los recibos de
+// un empleador que se armaron o se completaron.
+public record Resultado(List<string> Creados, List<Nomina> Nominas, List<string> YaEstaban, List<string> Combinados);
 
 // Lo que necesita el motor del OCR: las palabras de una hoja escaneada (ruta, número de hoja desde 1).
 public delegate Task<IReadOnlyList<Palabra>> Ocr(string ruta, int hoja);
@@ -258,8 +260,9 @@ public static class Recibos
     /// Las iniciales en la firma son a pedido: son un parche para los recibos que vuelven sin firmar. Nunca pisa un
     /// archivo: el recibo que ya estaba separado queda como está. «permiso» recibe lo que se va a escribir, antes de
     /// escribir nada: si dice que no, no se guarda ninguno.</summary>
+    /// <summary>«permiso» recibe los recibos y los combinados que se van a escribir, y dice si se escriben.</summary>
     public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null,
-        bool iniciales = true, Func<IReadOnlyList<string>, Task<bool>>? permiso = null)
+        bool iniciales = true, Func<IReadOnlyList<string>, IReadOnlyList<string>, Task<bool>>? permiso = null)
     {
         // Por cada nombre, una lista: casi siempre de uno solo, y de dos si hay dos empleados que se llaman igual.
         var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio), List<(List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils)>>();
@@ -267,6 +270,22 @@ public static class Recibos
         var creados = new List<string>();
         var yaEstaban = new List<string>();
         var nominas = new List<Nomina>();
+        var hechos = new List<string>();
+        // Las hojas de un empleado, como en su archivo: con sus iniciales si se eligió estamparlas.
+        void Copiar(PdfDocumentBuilder b, PdfDocumentBuilder.AddedFont? fuente, string nombre, List<(PdfDocument Doc, int Hoja, Palabra? Firma)> hojas,
+            Action<PdfPageBuilder>? ademas = null, bool avisarSinFirma = true)
+        {
+            foreach (var (doc, n, firma) in hojas)
+            {
+                var p = b.AddPage(doc, n);
+                if (fuente is not null)
+                {
+                    if (firma is not null) Estampar(p, fuente, firma, Iniciales(nombre));
+                    else if (avisarSinFirma) avisar($"⚠ {nombre}: no encontré el espacio de firma, va sin iniciales");
+                }
+                ademas?.Invoke(p);
+            }
+        }
         try
         {
             foreach (var ruta in pdfs)
@@ -336,28 +355,126 @@ public static class Recibos
                         // y la revisión de la nómina los busca ahí. «iniciales» marca los que llevan las del estudio:
                         // la revisión de clientes no los cuenta como firmados por el empleado.
                         builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "");
-                        var fuente = iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null;
-                        foreach (var (doc, n, firma) in hojas)
-                        {
-                            var p = builder.AddPage(doc, n);
-                            if (fuente is null) continue;
-                            if (firma is not null) Estampar(p, fuente, firma, Iniciales(nombre));
-                            else avisar($"⚠ {nombre}: no encontré el espacio de firma, va sin iniciales");
-                        }
+                        Copiar(builder, iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null, nombre, hojas);
                         Directory.CreateDirectory(destino);
                         await GuardarNuevo(salida, builder.Build());
                         creados.Add(salida);
                         avisar($"✓ {Path.GetFileName(destino)}\\{Path.GetFileName(salida)}");
                     }));
                 }
-            if (pendientes.Count > 0 && permiso is not null && !await permiso(pendientes.Select(p => p.Ruta).ToList())) pendientes.Clear();
-            foreach (var (_, escribir) in pendientes) await escribir();
+
+            // El combinado de cada empleador y mes, al lado de los separados: «EMPLEADOR RECIBOS FIRMADOS 10 2026.pdf» (sin
+            // «FIRMADOS» si no llevan iniciales), con todos los recibos en el orden en que vinieron. Como el consolidado de
+            // los clientes: si ya está con todos, no se toca; si le falta alguien, se le suma al final, sin cambiar lo que
+            // tenía. Cada uno se reconoce por sus números (el CUIL y el CUIT), que van escritos en sus hojas.
+            var combinados = new List<(string Ruta, Func<Task> Escribir)>();
+            foreach (var g in grupos.GroupBy(kv => (kv.Key.Carpeta, kv.Key.Empleador, kv.Key.Mes, kv.Key.Anio)))
+            {
+                var (carpeta, empleador, mes, anio) = g.Key;
+                var destino = Path.Combine(carpeta, Limpiar(SinComa(empleador)));
+                var ruta = Path.Combine(destino, NombreArchivo($"{empleador} RECIBOS{(iniciales ? " FIRMADOS" : "")}", mes, anio));
+                HashSet<string>? estan = null;
+                if (File.Exists(ruta))
+                    try
+                    {
+                        using var d = PdfDocument.Open(ruta);
+                        estan = Cuils(d.Information.Keywords + " " + string.Join(" ", d.GetPages().SelectMany(p => p.GetWords()).Select(w => w.Text))).ToHashSet();
+                    }
+                    catch (Exception e) when (e is not OperationCanceledException)
+                    {
+                        avisar($"⚠ {Path.GetFileName(ruta)}: no lo pude abrir, así que no lo completé ({e.Message})");
+                        continue;
+                    }
+                var faltan = g.SelectMany(kv => kv.Value.Select(t => (kv.Key.Nombre, t.Hojas, t.Cuils)))
+                    .Where(t => estan is null || !t.Cuils.IsSubsetOf(estan))
+                    .OrderBy(t => docs.IndexOf(t.Hojas[0].Doc)).ThenBy(t => t.Hojas[0].Hoja).ToList();
+                if (faltan.Count == 0) continue;
+                combinados.Add((ruta, async () =>
+                {
+                    var b = new PdfDocumentBuilder();
+                    // Sin los CUIL: en las palabras clave valdrían para todas las hojas.
+                    b.DocumentInformation.Keywords = $"{mes:00}/{anio} combinado" + (iniciales ? " iniciales" : "");
+                    var letra = b.AddStandard14Font(Standard14Font.Helvetica);
+                    var fuente = iniciales ? b.AddTrueTypeFont(Manuscrita.Value) : null;
+                    Directory.CreateDirectory(destino);
+                    await Juntar(ruta, b, null, () =>
+                    {
+                        foreach (var (nombre, hojas, cuils) in faltan)
+                            Copiar(b, fuente, nombre, hojas, p => Invisible(p, letra, string.Join(" ", cuils.Select(c => "CUIL " + c))), avisarSinFirma: false);
+                        return Task.FromResult(faltan.Sum(t => t.Hojas.Count));
+                    });
+                    hechos.Add(ruta);
+                    avisar($"▤ {Path.GetFileName(destino)}\\{Path.GetFileName(ruta)}");
+                }));
+            }
+
+            if (pendientes.Count + combinados.Count > 0 && permiso is not null
+                && !await permiso(pendientes.Select(p => p.Ruta).ToList(), combinados.Select(c => c.Ruta).ToList()))
+            {
+                pendientes.Clear();
+                combinados.Clear();
+            }
+            // Los recibos primero y el combinado al final: llega último, con todos.
+            foreach (var (_, escribir) in pendientes.Concat(combinados)) await escribir();
         }
         finally
         {
             foreach (var d in docs) d.Dispose();
         }
-        return new Resultado(creados, nominas, yaEstaban);
+        return new Resultado(creados, nominas, yaEstaban, hechos);
+    }
+
+    /// <summary>Un PDF que junta recibos: nuevo, o el que ya estaba con lo que le falta al final. Las hojas que tenía quedan
+    /// como estaban (cada una pasa por «vieja», por si hay que escribirle quién está). «agregar» suma lo nuevo al final y dice
+    /// cuántas hojas son. Se arma aparte y recién entero ocupa el lugar del anterior: si algo falla, queda el que había.</summary>
+    internal static async Task Juntar(string ruta, PdfDocumentBuilder b, Action<PdfPageBuilder, int>? vieja, Func<Task<int>> agregar)
+    {
+        var existe = File.Exists(ruta);
+        var anterior = existe ? PdfDocument.Open(ruta) : null;
+        byte[] pdf;
+        try
+        {
+            var antes = anterior?.NumberOfPages ?? 0;
+            for (var i = 1; i <= antes; i++)
+            {
+                var p = b.AddPage(anterior!, i);
+                vieja?.Invoke(p, i);
+            }
+            var nuevas = await agregar();
+            pdf = b.Build();
+            using var hecho = PdfDocument.Open(pdf);
+            if (hecho.NumberOfPages != antes + nuevas) throw new IOException($"{Path.GetFileName(ruta)} no salió entero");
+        }
+        finally
+        {
+            // Cerrado antes de reemplazarlo: es uno de los que se copian.
+            anterior?.Dispose();
+        }
+        if (!existe)
+        {
+            await GuardarNuevo(ruta, pdf);
+            return;
+        }
+        var aparte = ruta + ".nuevo";
+        await GuardarNuevo(aparte, pdf);
+        try { File.Move(aparte, ruta, overwrite: true); }
+        catch
+        {
+            File.Delete(aparte);
+            throw;
+        }
+    }
+
+    /// <summary>Quién está en la hoja, en texto que no se ve pero se lee: la revisión siguiente lo encuentra sin OCR, y con
+    /// Ctrl+F se busca a cualquiera.</summary>
+    internal static void Invisible(PdfPageBuilder p, PdfDocumentBuilder.AddedFont fuente, string texto)
+    {
+        if (texto.Length == 0) return;
+        p.SetTextRenderingMode(TextRenderingMode.Neither);
+        p.AddText(texto, 4, new PdfPoint(20, 20), fuente);
+        // El modo del texto sigue valiendo para lo que se escriba después en la hoja (es del estado gráfico, no de este
+        // texto): vuelve a «pintar», para que nada de lo que venga atrás quede invisible.
+        p.SetTextRenderingMode(TextRenderingMode.Fill);
     }
 
     /// <summary>Escribe un archivo que no existía. Con CreateNew: si mientras tanto apareció uno con ese nombre, falla

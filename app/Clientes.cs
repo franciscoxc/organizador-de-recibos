@@ -805,8 +805,7 @@ public static class Clientes
         return pagina;
     }
 
-    // El consolidado se arma aparte, y recién entero reemplaza al que había: si algo falla, queda como estaba. Lo que ya
-    // tenía va primero, hoja por hoja tal cual; lo que faltaba, al final.
+    // El consolidado: lo que ya tenía va primero, hoja por hoja tal cual, y lo que faltaba al final (ver Recibos.Juntar).
     static async Task Consolidar(Escritura e, Revision r, Corregir corregir)
     {
         var b = new PdfDocumentBuilder();
@@ -815,52 +814,23 @@ public static class Clientes
         var fuente = b.AddStandard14Font(Standard14Font.Helvetica);
         var docs = new Dictionary<string, PdfDocument>(StringComparer.OrdinalIgnoreCase);
         PdfDocument Abrir(string ruta) => docs.TryGetValue(ruta, out var d) ? d : docs[ruta] = PdfDocument.Open(ruta);
-        // Quién está en la hoja, en texto invisible: la próxima revisión lo lee sin OCR, en esta PC o en otra, y con
-        // Ctrl+F se encuentra a cualquiera. Sin el CUIL de todos, al que el OCR no encontrara en la hoja se lo volvía a
-        // agregar en cada guardado. Los encontrados solo por el nombre llevan «POR NOMBRE»: siguen para revisar.
-        void Quienes(PdfPageBuilder p, string ruta, int hoja)
-        {
-            var texto = string.Join(" ", r.Renglones
-                .Where(x => x.Firmado.Any(h => h.Hoja == hoja && h.Ruta.Equals(ruta, StringComparison.OrdinalIgnoreCase)))
-                .Select(x => $"{(x.Firma == Firma.PorNombre ? "POR NOMBRE" : "CUIL")} {x.Empleado.Cuil} {Regex.Replace(Normal(x.Empleado.Nombre), "[^A-Z ]", "")}"));
-            if (texto.Length == 0) return;
-            p.SetTextRenderingMode(TextRenderingMode.Neither);
-            p.AddText(texto, 4, new PdfPoint(20, 20), fuente);
-        }
-        var existe = File.Exists(e.Ruta);
-        var antes = 0;
-        byte[] pdf;
+        // Quién está en la hoja, en texto invisible. Sin el CUIL de todos, al que el OCR no encontrara en la hoja se lo
+        // volvía a agregar en cada guardado. Los encontrados solo por el nombre llevan «POR NOMBRE»: siguen para revisar.
+        void Quienes(PdfPageBuilder p, string ruta, int hoja) => Recibos.Invisible(p, fuente, string.Join(" ", r.Renglones
+            .Where(x => x.Firmado.Any(h => h.Hoja == hoja && h.Ruta.Equals(ruta, StringComparison.OrdinalIgnoreCase)))
+            .Select(x => $"{(x.Firma == Firma.PorNombre ? "POR NOMBRE" : "CUIL")} {x.Empleado.Cuil} {Regex.Replace(Normal(x.Empleado.Nombre), "[^A-Z ]", "")}")));
         try
         {
-            if (existe)
+            await Recibos.Juntar(e.Ruta, b, (p, i) => Quienes(p, e.Ruta, i), async () =>
             {
-                var viejo = Abrir(e.Ruta);
-                antes = viejo.NumberOfPages;
-                for (var i = 1; i <= antes; i++) Quienes(b.AddPage(viejo, i), e.Ruta, i);
-            }
-            foreach (var h in e.Hojas)
-                Quienes(SeCorrige(h) ? await HojaCorregida(b, h, corregir) : b.AddPage(Abrir(h.Ruta), h.Hoja), h.Ruta, h.Hoja);
-            pdf = b.Build();
+                foreach (var h in e.Hojas)
+                    Quienes(SeCorrige(h) ? await HojaCorregida(b, h, corregir) : b.AddPage(Abrir(h.Ruta), h.Hoja), h.Ruta, h.Hoja);
+                return e.Hojas.Count;
+            });
         }
         finally
         {
-            // Cerrados antes de reemplazar el viejo, que es uno de ellos.
             foreach (var d in docs.Values) d.Dispose();
-        }
-        using (var nuevo = PdfDocument.Open(pdf))
-            if (nuevo.NumberOfPages != antes + e.Hojas.Count) throw new IOException("el consolidado nuevo no salió entero");
-        if (!existe)
-        {
-            await Recibos.GuardarNuevo(e.Ruta, pdf);
-            return;
-        }
-        var aparte = e.Ruta + ".nuevo";
-        await Recibos.GuardarNuevo(aparte, pdf);
-        try { File.Move(aparte, e.Ruta, overwrite: true); }
-        catch
-        {
-            File.Delete(aparte);
-            throw;
         }
     }
 }

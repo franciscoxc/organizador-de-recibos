@@ -27,10 +27,14 @@ public partial class Ventana
     // y falta la firma. Azul: todavía se está leyendo. Violeta: lo firmó el estudio con las iniciales.
     static readonly SolidColorBrush Amarillo = new(Color.FromRgb(0xEB, 0xB4, 0x1C)), TintaOscura = new(Color.FromRgb(0x3D, 0x2C, 0x00)),
         Azul = new(Color.FromRgb(0x2B, 0x6C, 0xB0)), Violeta = new(Color.FromRgb(0x87, 0x64, 0xB8));
-    const string Reloj = "\uE823", Pregunta = "\uE897", Raya = "\uE738", Lapiz = "\uE70F", Disquete = "\uE74E";
+    const string Reloj = "\uE823", Pregunta = "\uE897", Raya = "\uE738", Lapiz = "\uE70F", Disquete = "\uE74E", Portapapeles = "\uE77F";
     const double AltoRenglon = 38;
 
-    bool enClientes, clientesVistos, ordenarPorGrupo, guardando, planeando, lectorCreado;
+    bool enClientes, clientesVistos, guardando, planeando, lectorCreado;
+    FilaCliente? leyendo; // el que se está leyendo por primera vez
+    TextBlock? progresoCliente; // en su panel, por dónde va
+    string tecleado = ""; // lo que se escribió para saltar a un cliente
+    DateTime ultimaTecla;
     // Lo que muestra el panel de la derecha, y el cliente elegido cuando muestra uno.
     enum Muestra { Nada, Cliente, Guardar }
     Muestra muestra;
@@ -126,6 +130,37 @@ public partial class Ventana
             if (elegida?.Revision is { } r && (r.Firmados ?? r.CarpetaMes) is { } carpeta)
                 Process.Start(new ProcessStartInfo("explorer.exe", $"\"{carpeta}\"") { UseShellExecute = true });
         };
+        // La dirección de la misma carpeta, para pegarla en otro programa (en Infocontrol, al subir los recibos).
+        copiarCarpeta.Click += async (_, _) =>
+        {
+            if (elegida?.Revision is not { } r || (r.Firmados ?? r.CarpetaMes) is not { } carpeta) return;
+            for (var intento = 0; intento < 3; intento++)
+            {
+                try
+                {
+                    Clipboard.SetText(carpeta);
+                    Copiado($"Copiada: {carpeta}", Tilde);
+                    return;
+                }
+                catch (ExternalException) { }
+                // ponytail-keep: mirar si quedó igual. Con el portapapeles compartido de la VM (y el del Escritorio remoto),
+                // otro programa abre el portapapeles apenas cambia y SetText tira la excepción aunque ya copió: el botón
+                // decía «no pude copiar» con la dirección ya en el portapapeles.
+                try
+                {
+                    if (Clipboard.GetText() == carpeta)
+                    {
+                        Copiado($"Copiada: {carpeta}", Tilde);
+                        return;
+                    }
+                }
+                catch (ExternalException) { }
+                await Task.Delay(80);
+            }
+            // Lo tiene tomado otro programa: se dice, en vez de hacer como que se copió.
+            Copiado("No pude copiar: otro programa está usando el portapapeles. Probá de nuevo.", Cruz);
+        };
+        Hundir(copiarCarpeta, 0.92);
         // Arrastrar un borde lo hace Windows entre WM_ENTERSIZEMOVE y WM_EXITSIZEMOVE: así se distingue del tamaño que
         // pone la app al cambiar de vista o abrir el panel.
         SourceInitialized += (_, _) => System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle)?.AddHook(
@@ -138,6 +173,9 @@ public partial class Ventana
         // Los 400 del XAML cuentan el borde: se le suma, para que adentro queden los del diseño (ver Marco).
         SourceInitialized += (_, _) => Width = AnchoSeparar + Marco();
         SizeChanged += (_, e) => Estirado(e);
+        // Como en el Explorador: con la ventana en foco, escribir el comienzo de un nombre salta a ese cliente, y la misma
+        // letra otra vez, al siguiente que empieza igual. Enter lo abre.
+        TextInput += (_, e) => Saltar(e.Text);
         KeyDown += (_, e) =>
         {
             if (e.Key != Key.Escape) return;
@@ -246,14 +284,15 @@ public partial class Ventana
     void EsconderIcono()
     {
         esperaIcono++;
-        if (clientesIcono.Opacity <= 0) return;
+        // Siempre, aunque todavía no se vea: si acababa de empezar a aparecer (con la opacidad en 0 todavía), salir sin más
+        // lo dejaba terminar de aparecer, y la carpeta quedaba encima de la lista mientras se leía.
         Opacidad(clientesIcono, 0);
         Resorte.Animar((clientesIcono, "escala"), 0.85, v => clientesIconoEscala.ScaleX = clientesIconoEscala.ScaleY = v, rigidez: 300);
     }
 
     void DetalleTarjeta() => tarjetaDetalle.Text = estampar.IsChecked == true
-        ? "Un PDF por empleado y mes, con sus iniciales en la firma. O hacé clic para buscarlos."
-        : "Un PDF por empleado y mes. O hacé clic para buscarlos.";
+        ? "Un PDF por empleado y mes, con sus iniciales en la firma, y uno con todos juntos. O hacé clic para buscarlos."
+        : "Un PDF por empleado y mes, y uno con todos juntos. O hacé clic para buscarlos.";
 
     // ---- Las dos vistas ----
 
@@ -442,6 +481,7 @@ public partial class Ventana
         var (mes, anio) = (mesElegido, anioElegido);
         CerrarPanel();
         SacarFilas(lado);
+        leyendo = null;
         MostrarIcono();
         elegidos.Clear();
         Opacidad(clientesCartel, 0);
@@ -498,16 +538,26 @@ public partial class Ventana
                 var fila = porCliente[ruta];
                 EstadoClientes($"{i + 1} de {clientes.Count} · {Path.GetFileName(ruta)}");
                 Rueda(fila, true);
+                leyendo = fila;
+                if (elegida == fila && progresoCliente is { } p) p.Text = "Leyendo…";
                 var r = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, lector, mem,
-                    msg => Dispatcher.InvokeAsync(() => { if (g == generacionClientes) EstadoClientes(msg); }), corte), corte);
+                    msg => Dispatcher.InvokeAsync(() =>
+                    {
+                        if (g != generacionClientes) return;
+                        EstadoClientes(msg);
+                        // En su panel, si está abierto, sin el nombre del cliente adelante: ya es el título.
+                        if (elegida == fila && fila.Revision is null && progresoCliente is { } t) t.Text = $"Leyendo {msg[(msg.IndexOf(": ") + 2)..]}";
+                    }), corte), corte);
                 if (g != generacionClientes) return;
+                leyendo = null;
                 Rueda(fila, false);
                 ResolverCliente(fila, r);
                 _ = Task.Run(mem.Guardar);
             }
-            ordenarPorGrupo = true;
-            Acomodar();
             CartelClientes();
+            // Lo leído ya se puede guardar: la lectura a fondo de las hojas difíciles puede tardar, y lo que encuentre se
+            // guarda después (el consolidado se completa). Para estampar iniciales, el panel de cada uno pide esperarla.
+            guardar.IsEnabled = true;
 
             // La segunda pasada: primero se leyó todo lo fácil, para poder empezar a trabajar; ahora, de a un cliente,
             // las hojas donde no apareció nadie de la nómina, a fondo. Cada cliente se actualiza al terminar el suyo.
@@ -526,14 +576,9 @@ public partial class Ventana
                 ResolverCliente(fila, r);
                 _ = Task.Run(mem.Guardar);
             }
-            if (conDificiles.Count > 0)
-            {
-                Acomodar();
-                CartelClientes();
-            }
+            if (conDificiles.Count > 0) CartelClientes();
             EstadoClientes(lector is null ? "⚠ No pude preparar el OCR: las fotos quedaron sin leer"
                 : clientes.Count == 1 ? $"1 cliente · {TextoMes()}" : $"{clientes.Count} clientes · {TextoMes()}");
-            guardar.IsEnabled = true;
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -663,9 +708,28 @@ public partial class Ventana
         {
             if (f.Revision is not null) Resorte.Animar((f, "flecha"), si ? 4 : 0, v => chevronCorrida.X = v, rigidez: 420, rebote: 0.3);
         }, objetivo: cabecera);
-        // Al pasar por encima se ilumina el fondo, como una fila de Windows 11.
+        // Al pasar por encima se ilumina el fondo, como una fila de Windows 11. Elegido con el teclado (una letra, o Tab),
+        // también: el foco de siempre es un rectángulo punteado, que no es de Windows 11.
+        var conTeclado = false;
+        boton.FocusVisualStyle = null;
         boton.MouseEnter += (_, _) => Opacidad(fondo, 1);
-        boton.MouseLeave += (_, _) => Opacidad(fondo, 0);
+        boton.MouseLeave += (_, _) => { if (!conTeclado) Opacidad(fondo, 0); };
+        boton.GotKeyboardFocus += (_, _) =>
+        {
+            conTeclado = InputManager.Current.MostRecentInputDevice is KeyboardDevice;
+            if (conTeclado) Opacidad(fondo, 1);
+        };
+        boton.LostKeyboardFocus += (_, _) =>
+        {
+            conTeclado = false;
+            if (!boton.IsMouseOver) Opacidad(fondo, 0);
+        };
+        // La lista se corre lo justo para mostrarlo, con un resorte: la de WPF salta de golpe.
+        boton.RequestBringIntoView += (_, e) =>
+        {
+            e.Handled = true;
+            Mostrar(f);
+        };
         clientesFilas.Children.Add(el);
         porCliente[ruta] = f;
         // Si son muchos, entran escalonados los primeros catorce, que son los que se ven.
@@ -683,15 +747,15 @@ public partial class Ventana
             Opacidad(el, 0, alTerminar: () => clientesFilas.Children.Remove(el));
         }
         porCliente.Clear();
-        ordenarPorGrupo = false;
     }
 
-    // Cada renglón a su lugar: al terminar la revisión, los que tienen faltantes suben arriba y los demás les hacen lugar.
+    // Cada renglón a su lugar, siempre por orden alfabético. Antes, al terminar la primera pasada, los que tenían faltantes
+    // subían arriba: la lista se reordenaba mientras seguía la lectura a fondo y no se podía ir mirando lo ya revisado.
+    // Cuáles tienen faltantes ya lo dice el color de cada renglón.
     void Acomodar()
     {
         double y = 0;
-        var orden = ordenarPorGrupo ? porCliente.Values.OrderBy(f => f.Grupo).ThenBy(f => f.Orden) : porCliente.Values.OrderBy(f => f.Orden);
-        foreach (var f in orden)
+        foreach (var f in porCliente.Values.OrderBy(f => f.Orden))
         {
             var el = f.El;
             var top = y;
@@ -705,14 +769,78 @@ public partial class Ventana
     // el elegido, o la cruz, lo cierra.
     void Elegir(FilaCliente f)
     {
-        if (f.Revision is null) return; // todavía sin leer
         if (elegida == f && muestra == Muestra.Cliente)
         {
             CerrarPanel();
             return;
         }
         MarcarElegida(f);
-        MostrarCliente(f);
+        if (f.Revision is null) MostrarLeyendo(f);
+        else MostrarCliente(f);
+    }
+
+    // Uno que todavía no se terminó de leer: el panel se abre igual y dice por dónde va. Cuando termina, ResolverCliente
+    // pone en su lugar el de siempre.
+    void MostrarLeyendo(FilaCliente f)
+    {
+        // Lo último que se está leyendo de él ya está en la línea de arriba de la lista: se empieza por eso.
+        var nombre = Path.GetFileName(f.Ruta);
+        var ahora = clientesEstado.Text.StartsWith(nombre + ": ") ? $"Leyendo {clientesEstado.Text[(nombre.Length + 2)..]}" : "Leyendo…";
+        var t = progresoCliente = Nota(f == leyendo ? ahora : "Todavía no lo leí: van en orden, y le toca después de los de arriba.");
+        Llenar(nombre, TextoMes(), null, lista => lista.Add(t));
+        pieGuardar.Visibility = Visibility.Collapsed;
+        pieCliente.Visibility = Visibility.Collapsed;
+        AbrirPanel(Muestra.Cliente);
+    }
+
+    // Saltar a un cliente escribiendo el comienzo de su nombre (ver TextInput en IniciarClientes).
+    void Saltar(string texto)
+    {
+        if (!enClientes || texto.Length != 1 || !char.IsLetterOrDigit(texto[0]) || porCliente.Count == 0) return;
+        var ahora = DateTime.Now;
+        tecleado = ahora - ultimaTecla < TimeSpan.FromSeconds(1) ? tecleado + texto : texto;
+        ultimaTecla = ahora;
+        var buscado = Clientes.Normal(tecleado);
+        // La misma letra repetida recorre los que empiezan con ella; letras distintas buscan el nombre que empieza así,
+        // desde el que ya está elegido.
+        var repetida = buscado.All(c => c == buscado[0]);
+        if (repetida) buscado = buscado[..1];
+        var filas = porCliente.Values.OrderBy(x => x.Orden).ToList();
+        var actual = filas.FindIndex(x => x.Boton.IsKeyboardFocused);
+        var desde = repetida ? actual + 1 : Math.Max(actual, 0);
+        filas.Skip(desde).Concat(filas.Take(desde))
+            .FirstOrDefault(x => Clientes.Normal(Path.GetFileName(x.Ruta)).StartsWith(buscado, StringComparison.Ordinal))?.Boton.Focus();
+    }
+
+    // La lista se corre lo justo para que se vea el renglón entero.
+    void Mostrar(FilaCliente f)
+    {
+        var v = clientesDesplazar;
+        var arriba = porCliente.Values.Count(x => x.Orden < f.Orden) * AltoRenglon;
+        var destino = arriba < v.VerticalOffset ? arriba
+            : arriba + AltoRenglon > v.VerticalOffset + v.ViewportHeight ? arriba + AltoRenglon - v.ViewportHeight
+            : v.VerticalOffset;
+        if (Math.Abs(destino - v.VerticalOffset) < 0.5) return;
+        Resorte.Animar((v, "desplazar"), Math.Clamp(destino, 0, v.ScrollableHeight), x => v.ScrollToVerticalOffset(x),
+            desde: v.VerticalOffset, rigidez: 260, rebote: 0.1);
+    }
+
+    // El portapapeles no se ve: el botón mismo acusa recibo. El ícono se vuelve un tilde (o una cruz), con un rebote, y al
+    // rato vuelve a ser el portapapeles.
+    int copias;
+    void Copiado(string texto, string glifo)
+    {
+        var n = ++copias;
+        copiarCarpeta.ToolTip = texto;
+        AutomationProperties.SetHelpText(copiarCarpeta, texto);
+        copiarGlifo.Text = glifo;
+        Resorte.Animar((copiarGlifo, "escala"), 1, v => copiarEscala.ScaleX = copiarEscala.ScaleY = v, desde: 0.4, rigidez: 420, rebote: 0.45);
+        Luego(1800, () =>
+        {
+            if (n != copias) return;
+            copiarGlifo.Text = Portapapeles;
+            Resorte.Animar((copiarGlifo, "escala"), 1, v => copiarEscala.ScaleX = copiarEscala.ScaleY = v, desde: 0.7, rigidez: 420, rebote: 0.3);
+        });
     }
 
     // La marca de elegido viaja: la tarjeta del anterior se apaga y la del nuevo se levanta, con su sombra.
@@ -835,7 +963,10 @@ public partial class Ventana
         });
         pieGuardar.Visibility = Visibility.Collapsed;
         pieCliente.Visibility = Visibility.Visible;
-        abrirCarpeta.Visibility = (r.Firmados ?? r.CarpetaMes) is null ? Visibility.Collapsed : Visibility.Visible;
+        var carpeta = r.Firmados ?? r.CarpetaMes;
+        carpetaCliente.Visibility = carpeta is null ? Visibility.Collapsed : Visibility.Visible;
+        copiarCarpeta.ToolTip = $"Copiar la dirección de la carpeta:\n{carpeta}";
+        AutomationProperties.SetHelpText(copiarCarpeta, carpeta ?? "");
         guardarCliente.Visibility = Visibility.Collapsed;
         AbrirPanel(Muestra.Cliente);
         _ = PlanDelCliente(f, seccion);

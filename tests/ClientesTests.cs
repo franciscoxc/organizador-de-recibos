@@ -757,17 +757,20 @@ public class ClientesTests(ITestOutputHelper salida)
             var pdf = Path.Combine(raiz, "RECIBOS 10 2026.pdf");
             Pdf(pdf, Recibo(Gomez), Recibo(Lopez));
             var carpeta = Path.Combine(raiz, "PEREZ JUAN");
-            IReadOnlyList<string> pedidos = [];
-            Func<IReadOnlyList<string>, Task<bool>> Responde(bool si) => rutas =>
+            IReadOnlyList<string> pedidos = [], combinados = [];
+            Func<IReadOnlyList<string>, IReadOnlyList<string>, Task<bool>> Responde(bool si) => (rutas, juntos) =>
             {
                 pedidos = rutas;
+                combinados = juntos;
                 return Task.FromResult(si);
             };
 
-            // Si dicen que no, no se escribe nada: ni la carpeta del empleador.
+            // Si dicen que no, no se escribe nada: ni la carpeta del empleador. El combinado se pregunta aparte.
             var nada = await Recibos.Procesar([pdf], null, _ => { }, iniciales: false, permiso: Responde(false));
             Assert.Equal(["GOMEZ LUCIA 10 2026.pdf", "LOPEZ ANA 10 2026.pdf"], pedidos.Select(Path.GetFileName));
+            Assert.Equal(["PEREZ JUAN RECIBOS 10 2026.pdf"], combinados.Select(Path.GetFileName));
             Assert.Empty(nada.Creados);
+            Assert.Empty(nada.Combinados);
             Assert.False(Directory.Exists(carpeta));
 
             // El de Gómez ya estaba, puesto por otro: queda como está, y el permiso se pide solo por el de López.
@@ -781,13 +784,60 @@ public class ClientesTests(ITestOutputHelper salida)
             var deLopez = Assert.Single(r.Creados);
             Assert.Equal(Path.Combine(carpeta, "LOPEZ ANA 10 2026.pdf"), deLopez);
 
-            // Otra vez, ahora con iniciales: los dos ya están, así que no hay nada que escribir ni que preguntar, y el
-            // de López sigue sin iniciales.
+            // El combinado lleva a los dos, también a la de Gómez que ya estaba.
+            using (var d = PdfDocument.Open(Assert.Single(r.Combinados))) Assert.Equal(2, d.NumberOfPages);
+
+            // Otra vez: los dos recibos y el combinado ya están, así que no hay nada que escribir ni que preguntar.
             var antes = File.ReadAllBytes(deLopez);
-            var otra = await Recibos.Procesar([pdf], null, _ => { }, permiso: _ => throw new InvalidOperationException("no hay nada que preguntar"));
+            var otra = await Recibos.Procesar([pdf], null, _ => { }, iniciales: false,
+                permiso: (_, _) => throw new InvalidOperationException("no hay nada que preguntar"));
             Assert.Empty(otra.Creados);
+            Assert.Empty(otra.Combinados);
             Assert.Equal(2, otra.YaEstaban.Count);
             Assert.Equal(antes, File.ReadAllBytes(deLopez));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Separar_arma_el_combinado_y_lo_completa_sin_tocar_lo_que_tenia()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var pdf = Path.Combine(raiz, "RECIBOS 10 2026.pdf");
+            Pdf(pdf, Recibo(Gomez), Recibo(Lopez));
+            var r = await Recibos.Procesar([pdf], null, _ => { });
+            var combinado = Path.Combine(raiz, "PEREZ JUAN", "PEREZ JUAN RECIBOS FIRMADOS 10 2026.pdf");
+            Assert.Equal([combinado], r.Combinados);
+            Assert.Equal(2, r.Creados.Count); // el combinado no cuenta como recibo
+            string antes;
+            using (var d = PdfDocument.Open(combinado))
+            {
+                Assert.Equal(2, d.NumberOfPages);
+                // Las iniciales se ven, y quién está en la hoja también va escrito, sin verse.
+                var letras = d.GetPage(1).Letters;
+                Assert.Contains("G.L.", string.Concat(letras.Where(l => l.RenderingMode == TextRenderingMode.Fill).Select(l => l.Value)));
+                Assert.Contains($"CUIL{Gomez.Cuil}", string.Concat(letras.Where(l => l.RenderingMode == TextRenderingMode.Neither).Select(l => l.Value)).Replace(" ", ""));
+                antes = Palabras(d.GetPage(1)) + Palabras(d.GetPage(2));
+            }
+
+            // Con todos adentro, otra vez no se toca.
+            var bytes = File.ReadAllBytes(combinado);
+            Assert.Empty((await Recibos.Procesar([pdf], null, _ => { })).Combinados);
+            Assert.Equal(bytes, File.ReadAllBytes(combinado));
+
+            // Llega el recibo de Ruiz en otro PDF: se le suma al final, y lo que tenía queda igual.
+            var otro = Path.Combine(raiz, "RECIBO RUIZ 10 2026.pdf");
+            Pdf(otro, Recibo(Ruiz));
+            Assert.Equal([combinado], (await Recibos.Procesar([otro], null, _ => { })).Combinados);
+            Assert.False(File.Exists(combinado + ".nuevo"));
+            using (var d = PdfDocument.Open(combinado))
+            {
+                Assert.Equal(3, d.NumberOfPages);
+                Assert.Equal(antes, Palabras(d.GetPage(1)) + Palabras(d.GetPage(2)));
+                Assert.Contains(Ruiz.Cuil, Palabras(d.GetPage(3)));
+            }
         }
         finally { Directory.Delete(raiz, true); }
     }

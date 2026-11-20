@@ -1,6 +1,6 @@
 # Organizador de Recibos
 
-**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.2/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.2/Organizador.de.Recibos.arm.exe)
+**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.3/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.1.3/Organizador.de.Recibos.arm.exe)
 
 Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
@@ -18,12 +18,18 @@ del estudio.
   Segoe Print, la letra manuscrita que trae Windows. Si un recibo ocupa dos hojas,
   quedan juntas en el mismo PDF y las dos llevan las iniciales. La casilla
   recuerda cómo la dejaste.
+- Uno con todos juntos, `EMPLEADOR RECIBOS FIRMADOS MM AAAA.pdf` (sin
+  «FIRMADOS» si no llevan iniciales), en el orden en que vinieron. Si ya existe y
+  tiene a todos, no se toca; si le falta alguien, se le suma al final, sin
+  cambiar lo que tenía.
 - Todo dentro de una carpeta con el nombre del empleador, al lado de los PDF
   originales.
-- Nunca reemplaza un archivo: si un recibo ya estaba separado, lo deja como
-  está y lo avisa. Para rehacerlo, borra antes el viejo.
+- Nunca reemplaza un recibo: si ya estaba separado, lo deja como está y lo
+  avisa. Para rehacerlo, borra antes el viejo. El combinado es lo único que se
+  reescribe, y solo para sumarle al final lo que le faltaba.
 - Si los PDF están fuera de la PC (una unidad de red como `Z:`), antes de
-  guardar pregunta: dice cuántos recibos son y en qué carpeta van.
+  guardar pregunta: dice cuántos recibos son, si va también el combinado y en qué
+  carpeta van.
 
 ## Cómo se usa
 
@@ -89,9 +95,17 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   traer dos recibos: cada empleado se busca por su cuenta. Y si el escaneo ya
   trae el texto que le puso el escáner, que suele leer peor, la app lo vuelve a
   leer con su OCR cuando ese texto no alcanza para encontrar a todos.
-- Un renglón por cliente, con los que tienen faltantes arriba. Al tocarlo, a la
-  derecha se abre un panel con sus empleados y los archivos en los que no
-  encontró a nadie de la nómina (una baja, un DNI, una foto ilegible).
+- Un renglón por cliente, siempre por orden alfabético: mientras sigue leyendo, la
+  lista no se reordena y se puede ir mirando lo ya revisado. El color de cada
+  renglón dice cómo está. Como en el Explorador, escribir el comienzo de un nombre
+  salta a ese cliente, la misma letra otra vez pasa al siguiente, y Enter lo abre.
+- Al tocar un cliente, a la derecha se abre un panel con sus empleados y los
+  archivos en los que no encontró a nadie de la nómina (una baja, un DNI, una foto
+  ilegible). Se abre también mientras se lo está leyendo, y dice por dónde va.
+  Al lado de «Abrir la carpeta», un portapapeles copia la dirección de esa
+  carpeta, para pegarla en otro programa (Infocontrol, al subir los recibos).
+- «Guardar» se puede usar apenas termina la lectura rápida: la lectura a fondo
+  de las hojas difíciles puede tardar, y lo que encuentre se guarda después.
 - Los que se fueron en el mes también están en la nómina, y su recibo es la
   liquidación final. La app los reconoce por la constancia de baja de ARCA, que
   dice cuándo se fueron, o por el nombre del archivo («LIQ FINAL …»), y lo dice

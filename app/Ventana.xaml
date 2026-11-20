@@ -158,7 +158,7 @@
                                    Text="Soltá acá los recibos o la nómina"/>
                         <TextBlock x:Name="tarjetaDetalle" Margin="6,4,6,0" TextAlignment="Center" TextWrapping="Wrap" FontSize="13"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   Text="Un PDF por empleado y mes, con sus iniciales en la firma. O hacé clic para buscarlos."/>
+                                   Text="Un PDF por empleado y mes, con sus iniciales en la firma, y uno con todos juntos. O hacé clic para buscarlos."/>
                         <TextBlock x:Name="estado" Margin="0,10,0,0" TextAlignment="Center" FontSize="12"
                                    TextTrimming="CharacterEllipsis" Visibility="Collapsed"
                                    Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
@@ -459,7 +459,18 @@
                                 </StackPanel>
                                 <!-- El pie de un cliente: su carpeta y guardar solo lo de él (la lista está arriba, en «Para guardar»). -->
                                 <Grid x:Name="pieCliente" Visibility="Collapsed">
-                                    <Button x:Name="abrirCarpeta" Content="Abrir la carpeta" HorizontalAlignment="Left"/>
+                                    <StackPanel x:Name="carpetaCliente" Orientation="Horizontal" HorizontalAlignment="Left">
+                                        <Button x:Name="abrirCarpeta" Content="Abrir la carpeta"/>
+                                        <!-- La dirección de la carpeta, para pegarla en otro programa: un portapapeles chiquito. -->
+                                        <Button x:Name="copiarCarpeta" Style="{StaticResource Icono}" Width="36" Height="36" Margin="2,0,0,0"
+                                                AutomationProperties.Name="Copiar la dirección de la carpeta" RenderTransformOrigin="0.5,0.5">
+                                            <TextBlock x:Name="copiarGlifo" Text="&#xE77F;" FontFamily="{StaticResource Iconos}" FontSize="14" RenderTransformOrigin="0.5,0.5">
+                                                <TextBlock.RenderTransform>
+                                                    <ScaleTransform x:Name="copiarEscala"/>
+                                                </TextBlock.RenderTransform>
+                                            </TextBlock>
+                                        </Button>
+                                    </StackPanel>
                                     <Button x:Name="guardarCliente" HorizontalAlignment="Right" MinWidth="96" Visibility="Collapsed"
                                             Style="{DynamicResource AccentButtonStyle}"/>
                                 </Grid>
