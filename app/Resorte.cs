@@ -60,7 +60,10 @@ static class Resorte
         anterior = ahora;
         foreach (var clave in activos.ToList())
         {
-            var e = estados[clave];
+            // ponytail-keep: se saltea lo que ya no está. El alLlegar de una animación puede olvidar otras (el mes que se
+            // va, las burbujas): si una de esas seguía en esta copia de la lista, buscarla tiraba KeyNotFoundException
+            // en medio del dibujo y la app se cerraba sola (cambiando de mes mientras se revisaba, el 19/11/2026).
+            if (!activos.Contains(clave) || !estados.TryGetValue(clave, out var e)) continue;
             // Pasos chicos: con un resorte rígido, integrar un cuadro entero de golpe lo vuelve inestable.
             for (var resto = dt; resto > 0; resto -= 1 / 480.0)
             {

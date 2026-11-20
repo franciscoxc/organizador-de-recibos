@@ -231,9 +231,69 @@ public class ClientesTests(ITestOutputHelper salida)
         finally { Directory.Delete(raiz, recursive: true); }
     }
 
-    // La carpeta de firmados de un cliente armado como los del estudio, sin nada adentro.
-    static string Firmados(string cliente) => Directory.CreateDirectory(Path.Combine(cliente, "4. SUELDOS Y CARGAS SOCIALES",
-        "1  LIQUIDACIONES DE SUELDOS 2026", $"{Path.GetFileName(cliente)} SUELDOS OCTUBRE 2026", "RECIBOS FIRMADOS OCTUBRE")).FullName;
+    // La carpeta del mes, y la de firmados (vacía), de un cliente armado como los del estudio.
+    static string Mes(string cliente) => Path.Combine(cliente, "4. SUELDOS Y CARGAS SOCIALES", "1  LIQUIDACIONES DE SUELDOS 2026",
+        $"{Path.GetFileName(cliente)} SUELDOS OCTUBRE 2026");
+    static string Firmados(string cliente) => Directory.CreateDirectory(Path.Combine(Mes(cliente), "RECIBOS FIRMADOS OCTUBRE")).FullName;
+
+    [Fact]
+    public void Dice_cuando_lo_que_se_guarda_cambia_de_nombre()
+    {
+        var juan = new Empleado("20-12345678-6", "PEREZ JUAN");
+        Hallazgo Foto(string ruta, int hoja = 1) => new(ruta, hoja, new Lectura("", Ocr: true));
+        Escritura Corregido(params Hallazgo[] hojas) => new(Accion.Corregido, Path.Combine("firmados", "PEREZ JUAN 10 2026.pdf"), juan, [.. hojas]);
+
+        Assert.Equal("Nombre corregido de «IMG_2034.jpg»: se guarda como «PEREZ JUAN 10 2026.pdf», y el original queda como está.",
+            Clientes.NombreCorregido(Corregido(Foto(Path.Combine("fotos", "IMG_2034.jpg")))));
+        // Dos hojas del mismo escaneo son un solo original; dos fotos, dos.
+        Assert.Contains("de «escaneo.pdf»:", Clientes.NombreCorregido(Corregido(Foto("escaneo.pdf", 1), Foto("escaneo.pdf", 2))));
+        Assert.Contains("de «a.jpg» y «b.jpg»: se guarda como «PEREZ JUAN 10 2026.pdf», y los originales quedan como están.",
+            Clientes.NombreCorregido(Corregido(Foto("a.jpg"), Foto("b.jpg"))));
+        // Si la foto ya se llamaba así, el nombre no cambia: no hay lápiz.
+        Assert.Null(Clientes.NombreCorregido(Corregido(Foto("PEREZ JUAN 10 2026.jpeg"))));
+    }
+
+    [Fact]
+    public async Task Reconoce_las_bajas_y_su_liquidacion_final()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var bajas = Directory.CreateDirectory(Path.Combine(Mes(cliente), "BAJAS")).FullName;
+            // López, con la constancia de baja de ARCA, que dice cuándo se fue.
+            Pdf(Path.Combine(bajas, "BAJA LOPEZ 15 10 2026.pdf"),
+                [("CONSTANCIA DEL TRABAJADOR", 40, 800), ("Baja", 40, 785), ("CUIL:", 40, 700), (Lopez.Cuil, 80, 700),
+                 ("Fecha Inicio: 01/01/2026", 40, 680), ("Fecha Cese: 15/10/2026", 250, 680)]);
+            // Ruiz, solo con su liquidación final sin firmar: se reconoce por el nombre del archivo.
+            Pdf(Path.Combine(bajas, "LIQ FINAL RUIZ 20 10 2026.PDF"), Recibo(Ruiz));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, null, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            Assert.Equal([null, null, "15/10/2026", "20/10/2026"], r.Renglones.Select(x => x.Baja));
+            // La constancia no es el recibo de nadie, y la lista dice qué falta de los que se fueron.
+            Assert.Equal(Firma.Falta, r.Renglones[3].Firma);
+            Assert.Contains($"CUIL {Ruiz.Cuil} · baja el 20/10/2026: falta la liquidación final firmada", Clientes.Lista(r));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Una_constancia_entre_los_firmados_no_es_un_recibo()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            File.WriteAllBytes(Path.Combine(Firmados(cliente), "ALTA FIRMADA.jpeg"), [0xFF, 0xD8]);
+            // El alta firmada de Gómez trae su CUIL, pero no es su recibo.
+            LeerImagen alta = (_, _, _) => Task.FromResult(new Lectura(
+                $"Simplificación Registral CONSTANCIA DEL TRABAJADOR Alta CUIL: {Gomez.Cuil} Fecha Inicio: 21/10/2026 Fecha Cese:", Ocr: true));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, alta, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            Assert.Equal(Firma.Falta, r.Renglones[0].Firma);
+            Assert.Null(r.Renglones[0].Baja);
+            Assert.Empty(r.Ilegibles);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
 
     [Fact]
     public async Task Una_hoja_con_dos_recibos_cuenta_para_los_dos()
@@ -391,7 +451,8 @@ public class ClientesTests(ITestOutputHelper salida)
             var r = await Clientes.Revisar(cliente, 10, 2026, null, Leer, new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None);
             Assert.Equal(Firma.PorNombre, r.Renglones.Single(x => x.Empleado == Ruiz).Firma);
             Assert.Equal(Firma.Falta, r.Renglones.Single(x => x.Empleado == Lopez).Firma);
-            Assert.Contains(r.Ilegibles, h => Path.GetFileName(h.Ruta) == "BAJA LOPEZ ANA.jpeg");
+            // La constancia de una baja se reconoce como tal: no es el recibo de nadie, ni queda «sin identificar».
+            Assert.DoesNotContain(r.Ilegibles, h => Path.GetFileName(h.Ruta) == "BAJA LOPEZ ANA.jpeg");
             Assert.Contains(r.Ilegibles, h => Path.GetFileName(h.Ruta) == "WhatsApp Image 3.jpeg");
         }
         finally

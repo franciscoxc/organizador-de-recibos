@@ -24,7 +24,9 @@ public delegate Task<(byte[] Jpeg, int Ancho, int Alto)> Corregir(Hallazgo h);
 
 public enum Firma { Falta, Firmado, PorNombre, ConIniciales }
 
-public record Renglon(Empleado Empleado, Firma Firma, List<Hallazgo> Firmado, List<Hallazgo> SinFirmar)
+// Baja: si se fue en el mes, la fecha de cese («01/10/2026»), o vacío si se sabe que se fue pero no cuándo. Su recibo
+// del mes es la liquidación final, que también tiene que volver firmada.
+public record Renglon(Empleado Empleado, Firma Firma, List<Hallazgo> Firmado, List<Hallazgo> SinFirmar, string? Baja = null)
 {
     // Como lo escribe su recibo, «APELLIDO NOMBRE»: la nómina de AFIP a veces pone el nombre primero, y no
     // siempre igual dentro del mismo PDF. Sin recibo con texto, el de la nómina.
@@ -377,6 +379,7 @@ public static class Clientes
         // Quién se encontró en cada hoja sin su CUIL entero, de a (hoja, CUIL): en una hoja con dos recibos, uno puede
         // estar por su CUIL y el otro solo por el nombre, y la marca de revisar es solo del segundo.
         var porNombre = new HashSet<(Hallazgo, string)>();
+        var bajas = new Dictionary<string, string>(); // CUIL → fecha de cese, o vacío si no se sabe
         var ilegibles = new List<Hallazgo>();
 
         // De a varios archivos a la vez, uno por núcleo: el OCR de una foto usa uno solo, y de a uno la primera
@@ -399,6 +402,15 @@ public static class Clientes
             {
                 var h = new Hallazgo(f.FullName, EsPdf(f) ? i + 1 : 0, e.Hojas[i]);
                 var cuils = DeLaNomina(e.Claves + " " + h.Lectura.Texto, porCuil.Keys);
+                // Una constancia de ARCA (alta, baja o modificación) nunca es un recibo, aunque traiga el CUIL: entre los
+                // firmados contaba como el firmado de esa persona, y una baja firmada tapaba que faltaba la liquidación
+                // final. La de una baja, además, dice que se fue y cuándo.
+                if (Normal(h.Lectura.Texto).Contains("CONSTANCIA DEL TRABAJADOR"))
+                {
+                    if (Regex.Match(Normal(h.Lectura.Texto), @"FECHA CESE:?\s*(\d{2}/\d{2}/\d{4})") is { Success: true } cese)
+                        foreach (var c in cuils) bajas[c] = cese.Groups[1].Value;
+                    continue;
+                }
                 if (!enFirmados)
                 {
                     // Afuera de los firmados cuenta solo lo que es un recibo: el resumen y la nómina también traen
@@ -435,6 +447,14 @@ public static class Clientes
             }
         }
 
+        // Sin constancia, la liquidación final se reconoce por el nombre del archivo del recibo sin firmar («LIQ FINAL
+        // PEREZ 01 10 2026.PDF»): su texto es igual al de un recibo cualquiera.
+        foreach (var (cuil, hs) in sinFirmar)
+            if (!bajas.ContainsKey(cuil) && hs.Select(h => Normal(Path.GetFileNameWithoutExtension(h.Ruta)))
+                    .FirstOrDefault(n => Regex.IsMatch(n, @"\bLIQ(UIDACION)?\b\.?\s*FINAL\b")) is { } archivo)
+                bajas[cuil] = Regex.Match(archivo, @"\b(\d{2})[ ./-](\d{2})[ ./-](\d{4})\b") is { Success: true } m
+                    ? $"{m.Groups[1]}/{m.Groups[2]}/{m.Groups[3]}" : "";
+
         var renglones = empleados.Select(x =>
         {
             var hs = firmado[x.Cuil];
@@ -442,7 +462,7 @@ public static class Clientes
                 : hs.All(deLaApp.Contains) ? Firma.ConIniciales
                 : hs.All(h => porNombre.Contains((h, x.Cuil))) ? Firma.PorNombre
                 : Firma.Firmado;
-            return new Renglon(x, firma, hs, sinFirmar[x.Cuil]);
+            return new Renglon(x, firma, hs, sinFirmar[x.Cuil], bajas.GetValueOrDefault(x.Cuil));
         }).ToList();
         return new(nombre, mes, anio, carpetaMes, nomina, destino, renglones, ilegibles, avisos);
     }
@@ -555,6 +575,23 @@ public static class Clientes
 
     static string SinFecha(string lista) => string.Join("\n", lista.Split('\n').Where(l => !l.StartsWith("Revisado el")).Select(l => l.TrimEnd('\r')));
 
+    // Lo que se agrega al nombre de alguien que se fue en el mes, en la lista y en el panel.
+    public static string DeBaja(Renglon x) => x.Baja is not { } cese ? ""
+        : (cese.Length > 0 ? $" · baja el {cese}" : " · baja") + (x.Firma == Firma.Falta ? ": falta la liquidación final firmada" : "");
+
+    // Si lo que se guarda lleva otro nombre que su original (la foto «IMG_2034.jpg» se guarda como «PEREZ JUAN 10
+    // 2026.pdf»), cómo decirlo; null si ya se llamaba así. El original no se renombra: queda como está.
+    public static string? NombreCorregido(Escritura e)
+    {
+        var nuevo = Path.GetFileName(e.Ruta);
+        var originales = e.Hojas.Select(h => Path.GetFileName(h.Ruta)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (originales.All(o => Path.GetFileNameWithoutExtension(o).Equals(Path.GetFileNameWithoutExtension(nuevo), StringComparison.OrdinalIgnoreCase)))
+            return null;
+        var de = originales.Count == 1 ? $"«{originales[0]}»"
+            : string.Join(", ", originales.SkipLast(1).Select(o => $"«{o}»")) + $" y «{originales[^1]}»";
+        return $"Nombre corregido de {de}: se guarda como «{nuevo}», y {(originales.Count == 1 ? "el original queda como está" : "los originales quedan como están")}.";
+    }
+
     /// <summary>El texto de FALTAN RECIBOS FIRMADOS MM AAAA.txt.</summary>
     public static string Lista(Revision r)
     {
@@ -564,7 +601,7 @@ public static class Clientes
             var quienes = r.Renglones.Where(x => x.Firma == firma).ToList();
             if (quienes.Count == 0) return;
             s.AppendLine().AppendLine(titulo);
-            foreach (var x in quienes) s.AppendLine($"    {x.Nombre} · CUIL {x.Empleado.Cuil}");
+            foreach (var x in quienes) s.AppendLine($"    {x.Nombre} · CUIL {x.Empleado.Cuil}{DeBaja(x)}");
         }
         s.AppendLine($"{Encabezado} · {r.Cliente} · {r.Mes:00}/{r.Anio}");
         s.AppendLine($"Revisado el {DateTime.Now:dd/MM/yyyy HH:mm} contra la nómina de AFIP ({r.Renglones.Count} empleados).");

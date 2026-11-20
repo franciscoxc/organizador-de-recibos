@@ -313,6 +313,8 @@
                     <!-- Amarillo si solo faltan firmas: el de la carpeta del ícono, con la letra oscura. -->
                     <Border x:Name="clientesCartelAmarillo" CornerRadius="10" Background="#EBB41C" Opacity="0"/>
                     <Border x:Name="clientesCartelVerde" CornerRadius="10" Background="#107C10" Opacity="0"/>
+                    <!-- Gris si no hubo nada que revisar (ningún cliente tiene la carpeta del mes o su nómina): ni bien ni mal. -->
+                    <Border x:Name="clientesCartelGris" CornerRadius="10" Background="#616161" Opacity="0"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                         <TextBlock x:Name="clientesCartelIcono" FontFamily="{StaticResource Iconos}" FontSize="16"
                                    Margin="0,1,10,0" VerticalAlignment="Center" Foreground="White" RenderTransformOrigin="0.5,0.5">

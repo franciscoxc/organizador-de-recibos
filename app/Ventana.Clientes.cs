@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Automation;
@@ -45,7 +46,7 @@ public partial class Ventana
     // El renglón de cada empleado del panel, por CUIL: ahí van los íconos de lo que se le va a guardar.
     readonly Dictionary<string, Ranura> ranuras = new();
     // El ícono «se guarda derecho» de cada uno: al recalcular el plan (por tildar iniciales) se reusa y no vuelve a entrar.
-    readonly Dictionary<string, (Button Boton, TextBlock Glifo)> iconosPlan = new();
+    readonly Dictionary<string, (FrameworkElement Caja, TextBlock Glifo)> iconosPlan = new();
 
     sealed record Ranura(StackPanel Acciones, TextBlock Debajo, Border Despliegue, string Nombre, TextBlock? Lupa, CheckBox? Casilla);
     // ponytail-keep: la columna de la derecha de los renglones de empleados mide lo mismo en todos (SharedSizeGroup,
@@ -124,6 +125,8 @@ public partial class Ventana
                 if (msg == 0x0232) estirando = false; // WM_EXITSIZEMOVE
                 return IntPtr.Zero;
             });
+        // Los 400 del XAML cuentan el borde: se le suma, para que adentro queden los del diseño (ver Marco).
+        SourceInitialized += (_, _) => Width = AnchoSeparar + Marco();
         SizeChanged += (_, e) => Estirado(e);
         KeyDown += (_, e) =>
         {
@@ -303,9 +306,28 @@ public partial class Ventana
     {
         ResizeMode = clientes ? ResizeMode.CanResize : ResizeMode.CanMinimize;
         var abierto = clientes && muestra != Muestra.Nada;
-        MinWidth = abierto ? AnchoSeparar + 360 : AnchoSeparar;
-        MaxWidth = abierto ? double.PositiveInfinity : AnchoSeparar;
+        var borde = Marco(); // ya con el borde nuevo: el de estirar es más ancho
+        MinWidth = (abierto ? AnchoSeparar + 360 : AnchoSeparar) + borde;
+        MaxWidth = abierto ? double.PositiveInfinity : AnchoSeparar + borde;
     }
+
+    // ponytail-keep: el ancho de la ventana se mide, no se escribe. Width cuenta el borde que Windows pone alrededor
+    // del contenido (unos 7 de cada lado, uno más si la ventana se puede estirar), y el diseño necesita sus 400
+    // adentro: con Width = 400 quedaban 385, y la tarjeta de separar, la barra del mes y el panel se cortaban a la
+    // derecha (19/11/2026). Depende del tipo de borde y de la pantalla. Minimizada, lo de adentro mide cero: vale la
+    // última medida.
+    double marco;
+    double Marco()
+    {
+        var h = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (WindowState != WindowState.Minimized && GetWindowRect(h, out var v) && GetClientRect(h, out var c) && c.Derecha > 0)
+            marco = (v.Derecha - v.Izquierda - c.Derecha) / VisualTreeHelper.GetDpi(this).DpiScaleX;
+        return marco;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct Rectangulo { public int Izquierda, Arriba, Derecha, Abajo; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr ventana, out Rectangulo r);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr ventana, out Rectangulo r);
 
     // Lo que movió el usuario arrastrando un borde: el alto va a la lista y el ancho al panel.
     void Estirado(SizeChangedEventArgs e)
@@ -839,12 +861,12 @@ public partial class Ventana
         foreach (var e in suyo)
             if (e.Empleado is { } emp && ranuras.TryGetValue(emp.Cuil, out var ranura) && EnRenglon(r, e, ranura, conIcono) is { } marca)
                 marcas[e] = (marca, ranura.Debajo);
-        // Si al recalcular ya no va el de alguno, su ícono se desvanece.
+        // Si al recalcular ya no va el de alguno, sus íconos se desvanecen.
         foreach (var cuil in iconosPlan.Keys.Except(conIcono).ToList())
         {
-            var (boton, _) = iconosPlan[cuil];
+            var (caja, _) = iconosPlan[cuil];
             iconosPlan.Remove(cuil);
-            Opacidad(boton, 0, alTerminar: () => (boton.Parent as Panel)?.Children.Remove(boton));
+            Opacidad(caja, 0, alTerminar: () => (caja.Parent as Panel)?.Children.Remove(caja));
         }
         var resto = suyo.Where(e => !marcas.ContainsKey(e)).ToList();
         if (resto.Count > 0)
@@ -897,11 +919,42 @@ public partial class Ventana
         Resorte.Animar((boton, "escala"), 1, v => escala.ScaleX = escala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.35);
         var cargar = ComoQueda(r, e)!;
         var viendo = false;
+        var nuevo = Path.GetFileName(e.Ruta);
         boton.Click += async (_, _) => await Desplegar(ranura.Despliegue, viendo = !viendo,
-            async () => [Nota(e.Hojas.Count == 1 ? "Así se guarda: derecho y con más contraste." : "Así se guardan: derechas y con más contraste."), .. await cargar()]);
-        ranura.Acciones.Children.Add(boton);
-        iconosPlan[cuil] = (boton, glifo);
+            async () => [Nota(e.Hojas.Count == 1 ? $"Así se guarda, como «{nuevo}»: derecho y con más contraste." : $"Así se guardan, juntas en «{nuevo}»: derechas y con más contraste."), .. await cargar()]);
+        // Después del sol, que así sigue alineado con las casillas de las iniciales: un lápiz si cambia el nombre.
+        var caja = new StackPanel { Orientation = Orientation.Horizontal, Children = { boton } };
+        if (Clientes.NombreCorregido(e) is { } corregido) caja.Children.Add(Lapicito(corregido));
+        ranura.Acciones.Children.Add(caja);
+        iconosPlan[cuil] = (caja, glifo);
         return glifo;
+    }
+
+    // El lápiz del nombre corregido no se toca, se lee: al pasar por encima se aclara y dice qué nombre cambia, sin el
+    // fondo de los botones. Entra creciendo apenas después del sol, como la segunda opción de un menú.
+    FrameworkElement Lapicito(string corregido)
+    {
+        var glifo = new TextBlock
+        {
+            Text = Lapiz, FontFamily = (FontFamily)FindResource("Iconos"), FontSize = 13,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+        };
+        glifo.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+        var escala = new ScaleTransform(0.5, 0.5);
+        var lapiz = new Border
+        {
+            Width = 32, Height = 32, Margin = new(2, -4, 0, 0), VerticalAlignment = VerticalAlignment.Top, Background = Brushes.Transparent,
+            ToolTip = corregido, Child = glifo, Opacity = 0, RenderTransformOrigin = new(0.5, 0.5), RenderTransform = escala,
+        };
+        AutomationProperties.SetName(lapiz, corregido);
+        lapiz.MouseEnter += (_, _) => glifo.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+        lapiz.MouseLeave += (_, _) => glifo.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+        Luego(70, () =>
+        {
+            Opacidad(lapiz, 1, desde: 0);
+            Resorte.Animar((lapiz, "escala"), 1, v => escala.ScaleX = escala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.35);
+        });
+        return lapiz;
     }
 
     // Abajo del renglón, lo que arma cargar, creciendo con resorte; con ver en false se vuelve a cerrar.
@@ -1043,14 +1096,19 @@ public partial class Ventana
 
     FrameworkElement LineaEmpleado(FilaCliente f, Renglon x)
     {
-        // El disco dice cómo está; al pasar por encima, lo explica en palabras.
+        // El disco dice cómo está; al pasar por encima, lo explica en palabras. Si se fue en el mes, su recibo es la
+        // liquidación final, y se dice así.
+        var baja = x.Baja is { } cese ? (cese.Length > 0 ? $"baja el {cese}" : "baja") : null;
+        string ConBaja(string texto) => baja is null ? texto : texto.Length > 0 ? $"{baja} · {texto}" : baja;
         var (glifo, color, nota, explica) = x.Firma switch
         {
-            Firma.Firmado => (Tilde, Verde, "", "Firmado: su recibo firmado está con los firmados"),
-            Firma.PorNombre => (Tilde, Verde, "encontrado por el nombre: ilegible, revisar", "El CUIL no se leía bien y lo encontré por el nombre: revisalo"),
-            Firma.ConIniciales => (Lapiz, Violeta, "con las iniciales del estudio", "No volvió firmado: tiene las iniciales del estudio"),
-            _ when FaltaElRecibo(x) => (Cruz, Rojo, $"falta el recibo · CUIL {x.Empleado.Cuil}", "Falta el recibo: no está ni firmado ni sin firmar"),
-            _ => (Lapiz, Amarillo, $"falta la firma · CUIL {x.Empleado.Cuil}", "Falta la firma: está su recibo sin firmar, pero no volvió firmado"),
+            Firma.Firmado => (Tilde, Verde, ConBaja(""), baja is null ? "Firmado: su recibo firmado está con los firmados" : "Se fue en el mes: su liquidación final volvió firmada"),
+            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo"),
+            Firma.ConIniciales => (Lapiz, Violeta, ConBaja("con las iniciales del estudio"), "No volvió firmado: tiene las iniciales del estudio"),
+            _ when FaltaElRecibo(x) => (Cruz, Rojo, ConBaja($"{(baja is null ? "falta el recibo" : "falta la liquidación final")} · CUIL {x.Empleado.Cuil}"),
+                baja is null ? "Falta el recibo: no está ni firmado ni sin firmar" : "Se fue en el mes: su recibo es la liquidación final, y no está ni firmada ni sin firmar"),
+            _ => (Lapiz, Amarillo, ConBaja($"{(baja is null ? "falta la firma" : "falta la liquidación final firmada")} · CUIL {x.Empleado.Cuil}"),
+                baja is null ? "Falta la firma: está su recibo sin firmar, pero no volvió firmado" : "Se fue en el mes: está su liquidación final sin firmar, pero no volvió firmada"),
         };
         var disco = new Grid
         {
@@ -1328,9 +1386,12 @@ public partial class Ventana
     void PintarCartelClientes(double valor)
     {
         var k = Math.Max(1, (int)Math.Round(valor));
-        // Rojo si a algún cliente le falta un recibo; amarillo si solo faltan firmas; verde si están todos.
+        // Rojo si a algún cliente le falta un recibo; amarillo si solo faltan firmas; verde si están todos; gris si no
+        // hubo nada que revisar.
         var rojo = porCliente.Values.Any(f => f.Grupo == 0);
         var (texto, icono, color) = porCliente.Count == 0 ? ("No hay clientes con sueldos", Alerta, 0)
+            // Un mes sin carpetas (todavía no empezó, o se eligió otro sin querer) no es «TODOS OK»: no se revisó nada.
+            : porCliente.Values.All(f => f.Grupo == 3) ? ($"Nada para revisar en {Clientes.NombreMes(mesElegido).ToLowerInvariant()}", Raya, 3)
             : faltanClientes == 0 && valor < 0.5 ? ("TODOS OK", Tilde, 2)
             : rojo ? (k == 1 ? "Faltan recibos de 1 cliente" : $"Faltan recibos de {k} clientes", Alerta, 0)
             : (k == 1 ? "Faltan firmas de 1 cliente" : $"Faltan firmas de {k} clientes", Lapiz, 1);
@@ -1342,6 +1403,7 @@ public partial class Ventana
         }
         Opacidad(clientesCartelAmarillo, color == 1 ? 1 : 0);
         Opacidad(clientesCartelVerde, color == 2 ? 1 : 0);
+        Opacidad(clientesCartelGris, color == 3 ? 1 : 0);
         clientesCartelTexto.Foreground = clientesCartelIcono.Foreground = color == 1 ? TintaOscura : Brushes.White;
     }
 
@@ -1380,9 +1442,9 @@ public partial class Ventana
         muestra = que;
         if (estaba) return;
         var area = SystemParameters.WorkArea;
-        var anchoVentana = AnchoSeparar + AnchoDelPanel;
         panelCaja.Width = AnchoDelPanel;
         Estirable(true);
+        var anchoVentana = AnchoSeparar + AnchoDelPanel + Marco();
         Width = anchoVentana;
         var izquierda = Math.Clamp(Left, area.Left, Math.Max(area.Left, area.Right - anchoVentana));
         if (Math.Abs(izquierda - Left) > 0.5) Resorte.Animar((this, "izquierda"), izquierda, v => Left = v, desde: Left, rigidez: 170, rebote: 0.08);
@@ -1402,7 +1464,7 @@ public partial class Ventana
         {
             Resorte.Animar((panel, "ancho"), 0, v => panel.Width = Math.Max(0, v), desde: 0);
             Estirable(enClientes);
-            Width = AnchoSeparar;
+            Width = AnchoSeparar + Marco();
             return;
         }
         Resorte.Animar((panelCaja, "x"), -AnchoDelPanel * 0.3, v => panelCorrida.X = v, rigidez: 260, rebote: 0.05);
@@ -1411,7 +1473,7 @@ public partial class Ventana
         {
             if (muestra != Muestra.Nada) return;
             Estirable(enClientes);
-            Width = AnchoSeparar;
+            Width = AnchoSeparar + Marco();
         });
     }
 
