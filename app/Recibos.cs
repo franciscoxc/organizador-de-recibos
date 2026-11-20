@@ -16,7 +16,8 @@ public record Empleado(string Cuil, string Nombre);
 // La nómina de la declaración jurada de AFIP (F.931): quiénes tienen que tener recibo ese mes.
 public record Nomina(string Ruta, int Mes, string Anio, List<Empleado> Empleados);
 
-public record Resultado(List<string> Creados, List<Nomina> Nominas);
+// YaEstaban: los recibos que ya tenían su archivo de antes. No se reemplazan.
+public record Resultado(List<string> Creados, List<Nomina> Nominas, List<string> YaEstaban);
 
 // Lo que necesita el motor del OCR: las palabras de una hoja escaneada (ruta, número de hoja desde 1).
 public delegate Task<IReadOnlyList<Palabra>> Ocr(string ruta, int hoja);
@@ -254,12 +255,17 @@ public static class Recibos
     }
 
     /// <summary>Separa los recibos y lee las nóminas. Sin carpetaSalida, cada recibo va junto a su PDF de origen.
-    /// Las iniciales en la firma son a pedido: son un parche para los recibos que vuelven sin firmar.</summary>
-    public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null, bool iniciales = true)
+    /// Las iniciales en la firma son a pedido: son un parche para los recibos que vuelven sin firmar. Nunca pisa un
+    /// archivo: el recibo que ya estaba separado queda como está. «permiso» recibe lo que se va a escribir, antes de
+    /// escribir nada: si dice que no, no se guarda ninguno.</summary>
+    public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null,
+        bool iniciales = true, Func<IReadOnlyList<string>, Task<bool>>? permiso = null)
     {
-        var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio), (List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils)>();
+        // Por cada nombre, una lista: casi siempre de uno solo, y de dos si hay dos empleados que se llaman igual.
+        var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio), List<(List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils)>>();
         var docs = new List<PdfDocument>();
         var creados = new List<string>();
+        var yaEstaban = new List<string>();
         var nominas = new List<Nomina>();
         try
         {
@@ -284,9 +290,20 @@ public static class Recibos
 
                         var h = LeerHoja(ws, page.Width);
                         var clave = (carpetaSalida ?? Path.GetDirectoryName(Path.GetFullPath(ruta))!, h.Empleador, h.Nombre, h.Mes, h.Anio);
-                        if (!grupos.TryGetValue(clave, out var g)) grupos[clave] = g = ([], []);
-                        g.Hojas.Add((doc, page.Number, h.Firma));
-                        g.Cuils.UnionWith(Cuils(string.Join(" ", ws.Select(w => w.Texto))));
+                        var cuils = Cuils(string.Join(" ", ws.Select(w => w.Texto))).ToHashSet();
+                        if (!grupos.TryGetValue(clave, out var tocayos)) grupos[clave] = tocayos = [];
+                        // Dos empleados con el mismo nombre (un padre y su hijo) no son el mismo: antes salían juntos en un
+                        // solo PDF. Los distingue el CUIL. La hoja va con el último del mismo nombre cuyos números no
+                        // contradicen los suyos: una segunda hoja con un número mal leído, o sin ninguno, sigue con la
+                        // primera; otra con el mismo CUIT del empleador y otro CUIL es de otra persona.
+                        var i = tocayos.FindLastIndex(t => t.Cuils.IsSubsetOf(cuils) || cuils.IsSubsetOf(t.Cuils));
+                        if (i < 0)
+                        {
+                            tocayos.Add(([], []));
+                            i = tocayos.Count - 1;
+                        }
+                        tocayos[i].Hojas.Add((doc, page.Number, h.Firma));
+                        tocayos[i].Cuils.UnionWith(cuils);
                     }
                     catch (Exception e) when (e is not OperationCanceledException)
                     {
@@ -296,34 +313,69 @@ public static class Recibos
                 if (nomina is not null) nominas.Add(nomina);
             }
 
-            foreach (var ((carpeta, empleador, nombre, mes, anio), (hojas, cuils)) in grupos)
-            {
-                var builder = new PdfDocumentBuilder();
-                // El CUIL y el período van también en las palabras clave: un recibo escaneado no tiene texto,
-                // y la revisión de la nómina los busca ahí. «iniciales» marca los que llevan las del estudio:
-                // la revisión de clientes no los cuenta como firmados por el empleado.
-                builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "");
-                var fuente = iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null;
-                foreach (var (doc, n, firma) in hojas)
+            // Primero, qué archivo le toca a cada uno; se escribe después, cuando ya se sabe todo lo que hay para guardar
+            // y se pudo preguntar.
+            var pendientes = new List<(string Ruta, Func<Task> Escribir)>();
+            foreach (var ((carpeta, empleador, nombre, mes, anio), tocayos) in grupos)
+                foreach (var (hojas, cuils) in tocayos)
                 {
-                    var p = builder.AddPage(doc, n);
-                    if (fuente is null) continue;
-                    if (firma is not null) Estampar(p, fuente, firma, Iniciales(nombre));
-                    else avisar($"⚠ {nombre}: no encontré el espacio de firma, va sin iniciales");
+                    // Con un tocayo, el archivo lleva además su CUIL: de sus números, el que no tiene el otro (el CUIT
+                    // del empleador lo tienen los dos).
+                    var propio = tocayos.Count == 1 ? "" : string.Concat(cuils.Where(c => tocayos.Count(t => t.Cuils.Contains(c)) == 1).Select(c => " " + c));
+                    var destino = Path.Combine(carpeta, Limpiar(SinComa(empleador)));
+                    var salida = Path.Combine(destino, NombreArchivo(nombre + propio, mes, anio));
+                    if (File.Exists(salida))
+                    {
+                        yaEstaban.Add(salida);
+                        continue;
+                    }
+                    pendientes.Add((salida, async () =>
+                    {
+                        var builder = new PdfDocumentBuilder();
+                        // El CUIL y el período van también en las palabras clave: un recibo escaneado no tiene texto,
+                        // y la revisión de la nómina los busca ahí. «iniciales» marca los que llevan las del estudio:
+                        // la revisión de clientes no los cuenta como firmados por el empleado.
+                        builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "");
+                        var fuente = iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null;
+                        foreach (var (doc, n, firma) in hojas)
+                        {
+                            var p = builder.AddPage(doc, n);
+                            if (fuente is null) continue;
+                            if (firma is not null) Estampar(p, fuente, firma, Iniciales(nombre));
+                            else avisar($"⚠ {nombre}: no encontré el espacio de firma, va sin iniciales");
+                        }
+                        Directory.CreateDirectory(destino);
+                        await GuardarNuevo(salida, builder.Build());
+                        creados.Add(salida);
+                        avisar($"✓ {Path.GetFileName(destino)}\\{Path.GetFileName(salida)}");
+                    }));
                 }
-                var destino = Path.Combine(carpeta, Limpiar(SinComa(empleador)));
-                Directory.CreateDirectory(destino);
-                var salida = Path.Combine(destino, NombreArchivo(nombre, mes, anio));
-                await File.WriteAllBytesAsync(salida, builder.Build());
-                creados.Add(salida);
-                avisar($"✓ {Path.GetFileName(destino)}\\{Path.GetFileName(salida)}");
-            }
+            if (pendientes.Count > 0 && permiso is not null && !await permiso(pendientes.Select(p => p.Ruta).ToList())) pendientes.Clear();
+            foreach (var (_, escribir) in pendientes) await escribir();
         }
         finally
         {
             foreach (var d in docs) d.Dispose();
         }
-        return new Resultado(creados, nominas);
+        return new Resultado(creados, nominas, yaEstaban);
+    }
+
+    /// <summary>Escribe un archivo que no existía. Con CreateNew: si mientras tanto apareció uno con ese nombre, falla
+    /// en vez de pisarlo.</summary>
+    internal static async Task GuardarNuevo(string ruta, byte[] bytes)
+    {
+        var salida = new FileStream(ruta, FileMode.CreateNew, FileAccess.Write);
+        try
+        {
+            await using (salida) await salida.WriteAsync(bytes);
+        }
+        catch
+        {
+            // Lo único que la app borra: el archivo que acaba de crear ella misma (CreateNew garantiza que no
+            // existía) y que quedó a medias porque se cortó la red. Un PDF roto parecería un recibo.
+            try { File.Delete(ruta); } catch { }
+            throw;
+        }
     }
 
     // Segoe Print, la letra manuscrita que trae Windows: se toma de la PC y no viaja en el .exe,

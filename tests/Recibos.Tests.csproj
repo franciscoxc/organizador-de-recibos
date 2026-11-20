@@ -14,6 +14,8 @@
     <Compile Include="..\app\Actualizador.cs" />
     <Compile Include="..\app\WindowsOcr.cs" />
     <Compile Include="..\app\Lector.cs" />
+    <!-- El motor de los resortes, sin su reloj (Resorte.Reloj.cs), que es de WPF. -->
+    <Compile Include="..\app\Resorte.cs" />
     <EmbeddedResource Include="..\app\Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
     <EmbeddedResource Include="$(PkgRapidOcrNet)\models\v5\ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" LogicalName="modelos/%(Filename)%(Extension)" />
     <EmbeddedResource Include="..\app\modelos\*.*" LogicalName="modelos/%(Filename)%(Extension)" />

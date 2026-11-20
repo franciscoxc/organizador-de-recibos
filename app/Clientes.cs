@@ -9,14 +9,16 @@ using UglyToad.PdfPig.Writer;
 
 // Lo que dijo de una hoja (o de una foto) el texto del PDF o el OCR. Del OCR quedan también el giro y la
 // inclinación con que se leyó: con eso se endereza después, sin volver a leerla. Nombre: el «APELLIDO Y NOMBRE»
-// de un recibo con texto. AFondo: ya pasó por la lectura a fondo; si ahí tampoco apareció nadie, no se reintenta.
-public record Lectura(string Texto, bool Ocr = false, int Giro = 0, double Angulo = 0, string? Nombre = null, bool AFondo = false);
+// de un recibo con texto, y Empleador, su primera línea. AFondo: ya pasó por la lectura a fondo; si ahí tampoco apareció
+// nadie, no se reintenta.
+public record Lectura(string Texto, bool Ocr = false, int Giro = 0, double Angulo = 0, string? Nombre = null, bool AFondo = false,
+    string? Empleador = null);
 
 // Una hoja de un archivo; la hoja 0 es una foto.
 public record Hallazgo(string Ruta, int Hoja, Lectura Lectura);
 
-// Las fotos y los escaneos los lee Windows: el motor no sabe de OCR. «buscado» dice si el texto ya trae a
-// alguien de la nómina; mientras no, el OCR prueba otros giros.
+// Las fotos y los escaneos los lee el OCR (ver Lector.cs): el motor no sabe de OCR. «buscado» dice si el texto ya trae
+// a alguien de la nómina; mientras no, la lectura a fondo prueba otros giros y más ampliación.
 public delegate Task<Lectura> LeerImagen(string ruta, int hoja, Func<string, bool> buscado);
 
 // La versión que se guarda de una foto o de una hoja escaneada: girada, derecha y con contraste, en JPEG.
@@ -54,11 +56,25 @@ public sealed class Memoria
     readonly string ruta;
     readonly Dictionary<string, Entrada> datos;
 
-    public Memoria(string ruta)
+    /// <summary>«anterior» es la memoria de la versión 1.1.0, que era una sola para todos los meses. La primera vez que
+    /// se abre un mes se traen de ahí sus lecturas con OCR (las de los archivos que acepta «deEsteMes»), para no leer
+    /// de nuevo todas las fotos. Lo que era texto de un PDF no se trae: se relee en un momento, y así viene con el
+    /// empleador, que antes no se guardaba.</summary>
+    public Memoria(string ruta, string? anterior = null, Func<string, bool>? deEsteMes = null)
     {
         this.ruta = ruta;
-        try { datos = new(JsonSerializer.Deserialize<Dictionary<string, Entrada>>(File.ReadAllText(ruta))!, StringComparer.OrdinalIgnoreCase); }
-        catch { datos = new(StringComparer.OrdinalIgnoreCase); } // la primera vez no hay nada guardado
+        if (Leer(ruta) is { } guardadas) datos = guardadas;
+        else
+        {
+            var heredadas = anterior is null ? null : Leer(anterior)?.Where(e => deEsteMes?.Invoke(e.Key) != false && e.Value.Hojas.Any(h => h.Ocr));
+            datos = new(heredadas ?? [], StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    static Dictionary<string, Entrada>? Leer(string ruta)
+    {
+        try { return new(JsonSerializer.Deserialize<Dictionary<string, Entrada>>(File.ReadAllText(ruta))!, StringComparer.OrdinalIgnoreCase); }
+        catch { return null; } // la primera vez no hay nada guardado
     }
 
     // Con candado: al cambiar de mes, la revisión anterior puede estar terminando su último archivo.
@@ -107,7 +123,14 @@ public static class Clientes
 
     /// <summary>La carpeta de los clientes elegida, llevada a otro año: el estudio arma una por año y la ruta lo
     /// nombra («…\CLIENTES 2026\…»). Sin año en la ruta, queda igual.</summary>
-    public static string RaizDelAnio(string elegida, int anio) => Regex.Replace(elegida, @"(?<!\d)(19|20)\d{2}(?!\d)", anio.ToString());
+    public static string RaizDelAnio(string elegida, int anio)
+    {
+        // El año de la ruta es el último que nombra, y se cambia en todos los lugares donde está («…\ESTUDIO 2026\CLIENTES
+        // 2026»). Otro año más arriba («…\ESTUDIO 2019\CLIENTES 2026») es parte de un nombre: cambiándolo también, se
+        // buscaba una carpeta que no existe.
+        var ultimo = Regex.Match(elegida, @"(?<!\d)(19|20)\d{2}(?!\d)", RegexOptions.RightToLeft);
+        return ultimo.Success ? Regex.Replace(elegida, $@"(?<!\d){ultimo.Value}(?!\d)", anio.ToString()) : elegida;
+    }
 
     public static string NombreMes(int mes) => Meses[mes - 1];
 
@@ -203,15 +226,23 @@ public static class Clientes
 
     /// <summary>Los empleados que aparecen en la hoja sin su CUIL entero: por el nombre (al menos dos de sus palabras, o
     /// todas si tiene menos), o por un CUIL casi igual con algo del nombre. Una hoja puede traer varios recibos,
-    /// escaneados de a dos, y cada uno se busca por su cuenta; los que ya están por su CUIL no se repiten.</summary>
-    public static List<Empleado> Nombrados(string texto, IReadOnlyList<Empleado> nomina, ICollection<string> yaEstan)
+    /// escaneados de a dos, y cada uno se busca por su cuenta; los que ya están por su CUIL no se repiten. «empleador»
+    /// es como lo nombran los recibos.</summary>
+    public static List<Empleado> Nombrados(string texto, IReadOnlyList<Empleado> nomina, ICollection<string> yaEstan, string empleador = "")
     {
         var palabras = Partes(texto).ToHashSet();
+        // ponytail-keep: las palabras que ya tienen dueño en la hoja no nombran a nadie más. Son las del empleador, que
+        // encabeza todos los recibos, y las de los que están por su CUIL. Sin esto, con «GOMEZ MARIA» por su CUIL, «GOMEZ
+        // MARIA JOSE» figuraba en la hoja de ella; y a un empleado con el apellido y un nombre del empleador (su hijo), o
+        // con el apellido del empleador y el nombre de un compañero, se lo encontraba en los recibos de todos: nunca le
+        // faltaba el suyo.
+        var conDueno = Partes(empleador + " " + string.Join(" ", nomina.Where(e => yaEstan.Contains(e.Cuil)).Select(e => e.Nombre))).ToHashSet();
         var presentes = nomina.Select(e => (Empleado: e, Total: Partes(e.Nombre).Length, Estan: Partes(e.Nombre).Where(palabras.Contains).ToHashSet())).ToList();
         // Si dos comparten palabras («PEREZ JUAN CARLOS» y «PEREZ JUAN MARTIN»), cuenta el que tiene más en la hoja: el
         // otro aparece solo por lo que comparten.
         var lista = presentes
-            .Where(t => t.Total > 0 && t.Estan.Count >= Math.Min(2, t.Total) && !presentes.Any(o => t.Estan.IsProperSubsetOf(o.Estan)))
+            .Where(t => t.Total > 0 && t.Estan.Count >= Math.Min(2, t.Total) && !t.Estan.IsSubsetOf(conDueno)
+                && !presentes.Any(o => t.Estan.IsProperSubsetOf(o.Estan)))
             .Select(t => t.Empleado).Where(e => !yaEstan.Contains(e.Cuil)).ToList();
         if (PorCuilParecido(texto, nomina) is { } parecido && !yaEstan.Contains(parecido.Cuil) && !lista.Contains(parecido)) lista.Add(parecido);
         return lista;
@@ -289,7 +320,11 @@ public static class Clientes
             foreach (var p in doc.GetPages())
             {
                 var texto = string.Join(" ", p.GetWords().Select(w => w.Text));
-                if (texto.Length > 0 || !firmado || porClaves) lecturas.Add(Task.FromResult(new Lectura(texto, Nombre: NombreDelRecibo(p, texto))));
+                if (texto.Length > 0 || !firmado || porClaves)
+                {
+                    var recibo = Recibo(p, texto);
+                    lecturas.Add(Task.FromResult(new Lectura(texto, Nombre: recibo?.Nombre, Empleador: recibo?.Empleador)));
+                }
                 else if (leer is null)
                 {
                     completa = false;
@@ -317,11 +352,11 @@ public static class Clientes
         return new(f.Length, f.LastWriteTimeUtc, claves, hojas);
     }
 
-    // El «APELLIDO Y NOMBRE» de una hoja de recibo con texto, leído como al separar a mano.
-    static string? NombreDelRecibo(Page p, string texto)
+    // Una hoja de recibo con texto, leída como al separar a mano: de ahí salen el «APELLIDO Y NOMBRE» y el empleador.
+    static Hoja? Recibo(Page p, string texto)
     {
         if (!Normal(texto).Contains("FIRMA DEL EMPLEADO")) return null;
-        try { return Recibos.LeerHoja(Recibos.Palabras(p), p.Width).Nombre; }
+        try { return Recibos.LeerHoja(Recibos.Palabras(p), p.Width); }
         catch (FormatException) { return null; } // otro formato: queda el nombre de la nómina
     }
 
@@ -394,6 +429,8 @@ public static class Clientes
                 catch (Exception ex) when (ex is not OperationCanceledException) { errores[i] = $"{lista[i].Name}: {ex.Message}"; }
             });
         avisos.AddRange(errores.OfType<string>());
+        // Cómo nombran al empleador los recibos con texto (los que arma el estudio): así está escrito también en las fotos.
+        var empleador = string.Join(" ", leidos.SelectMany(e => e?.Hojas ?? []).Select(l => l.Empleador).Distinct());
         foreach (var (f, e) in lista.Zip(leidos))
         {
             if (e is null) continue;
@@ -423,7 +460,7 @@ public static class Clientes
                 // se buscaba por el nombre solo en las hojas sin nadie: en un escaneo de dos recibos por hoja, el CUIL de
                 // una empleada salió entero y el del otro no, la hoja quedó de ella y él figuraba sin firma aunque su
                 // nombre estaba en el texto. Los que se encuentran así quedan para revisar.
-                foreach (var otro in Nombrados(h.Lectura.Texto, empleados, cuils))
+                foreach (var otro in Nombrados(h.Lectura.Texto, empleados, cuils, empleador))
                 {
                     cuils.Add(otro.Cuil);
                     porNombre.Add((h, otro.Cuil));
@@ -460,7 +497,9 @@ public static class Clientes
             var hs = firmado[x.Cuil];
             var firma = hs.Count == 0 ? Firma.Falta
                 : hs.All(deLaApp.Contains) ? Firma.ConIniciales
-                : hs.All(h => porNombre.Contains((h, x.Cuil))) ? Firma.PorNombre
+                // Lo que estampó el estudio no dice si firmó: si lo demás es todo por el nombre, sigue para revisar. Con
+                // la copia con iniciales al lado, una foto encontrada solo por el nombre pasaba por firmada.
+                : hs.Where(h => !deLaApp.Contains(h)).All(h => porNombre.Contains((h, x.Cuil))) ? Firma.PorNombre
                 : Firma.Firmado;
             return new Renglon(x, firma, hs, sinFirmar[x.Cuil], bajas.GetValueOrDefault(x.Cuil));
         }).ToList();
@@ -534,9 +573,11 @@ public static class Clientes
 
         foreach (var x in r.Renglones)
         {
-            // Los firmados que llegaron en foto o escaneados: un PDF por empleado, derecho y con contraste.
+            // Los firmados que llegaron en foto o escaneados: un PDF por empleado, derecho y con contraste. Los
+            // encontrados solo por el nombre, no: ese PDF lleva su CUIL adentro y en la revisión siguiente contaba como
+            // firmado de verdad, sin que nadie hubiera mirado la suposición.
             var imagenes = x.Firmado.Where(h => h.Lectura.Ocr).ToList();
-            if (imagenes.Count > 0 && Libre(Archivo(firmados, x, r)))
+            if (x.Firma != Firma.PorNombre && imagenes.Count > 0 && Libre(Archivo(firmados, x, r)))
                 plan.Add(new(Accion.Corregido, Archivo(firmados, x, r), x.Empleado, imagenes));
 
             // Las iniciales del estudio, sobre el recibo sin firmar del PDF con menos empleados (el suelto, si está).
@@ -685,19 +726,7 @@ public static class Clientes
                 fuente ??= b.AddTrueTypeFont(Recibos.Manuscrita.Value);
                 Recibos.Estampar(copia, fuente, hoja.Firma, Recibos.Iniciales(hoja.Nombre));
             }
-            var bytes = b.Build();
-            var salida = new FileStream(e.Ruta, FileMode.CreateNew, FileAccess.Write);
-            try
-            {
-                await using (salida) await salida.WriteAsync(bytes);
-            }
-            catch
-            {
-                // Lo único que la app borra: el archivo que acaba de crear ella misma (CreateNew garantiza que no
-                // existía) y que quedó a medias porque se cortó la red. Un PDF roto parecería un recibo.
-                try { File.Delete(e.Ruta); } catch { }
-                throw;
-            }
+            await Recibos.GuardarNuevo(e.Ruta, b.Build());
         }
         finally
         {

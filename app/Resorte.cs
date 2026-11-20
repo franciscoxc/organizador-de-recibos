@@ -1,10 +1,9 @@
-using System.Windows;
-using System.Windows.Media;
-
 // Todo lo que se mueve va con resortes: ni la posición ni la velocidad saltan, y si el destino cambia a
 // mitad de camino (otro clic, otro PDF) sigue desde donde está con la velocidad que traía. Las
 // animaciones de WPF no sirven para eso: al cambiarles el destino arrancan de cero la velocidad.
-static class Resorte
+// Sin WPF: así las pruebas lo compilan directo y mueven los resortes a mano, con Paso. El reloj (un paso por cada
+// cuadro que dibuja la ventana) y Quieto están en Resorte.Reloj.cs.
+static partial class Resorte
 {
     sealed class Estado
     {
@@ -15,12 +14,6 @@ static class Resorte
 
     static readonly Dictionary<object, Estado> estados = [];
     static readonly HashSet<object> activos = [];
-    static TimeSpan anterior;
-    static bool enganchado;
-
-    // «Efectos de animación» apagado en Windows: nada se desliza ni rebota, todo llega al instante.
-    // Lo que entra o sale lo hace con un fundido (ver Ventana.Aparecer).
-    public static bool Quieto => !SystemParameters.ClientAreaAnimation;
 
     /// <param name="clave">Lo que se anima; con la misma clave, un destino nuevo sigue desde donde está.</param>
     /// <param name="rebote">0: llega sin pasarse; 0,3: un rebote chico.</param>
@@ -38,11 +31,11 @@ static class Resorte
         e.AlLlegar = alLlegar;
         if (Quieto) { Terminar(clave, e); return; }
         activos.Add(clave);
-        if (enganchado) return;
-        anterior = TimeSpan.Zero;
-        CompositionTarget.Rendering += Cuadro;
-        enganchado = true;
+        Enganchar();
     }
+
+    // Arranca el reloj, si está parado. Lo pone Resorte.Reloj.cs; en las pruebas no hay.
+    static partial void Enganchar();
 
     // Para lo que se descarta (un recibo que ya llegó): sin esto su estado quedaría guardado para siempre.
     public static void Olvidar(object clave)
@@ -51,13 +44,9 @@ static class Resorte
         estados.Remove(clave);
     }
 
-    static void Cuadro(object? s, EventArgs a)
+    /// <summary>Mueve dt segundos todo lo que se está moviendo.</summary>
+    internal static void Paso(double dt)
     {
-        var ahora = ((RenderingEventArgs)a).RenderingTime;
-        // WPF a veces avisa dos veces el mismo cuadro: sin tiempo transcurrido no hay nada que mover.
-        if (ahora == anterior) return;
-        var dt = anterior == TimeSpan.Zero ? 1 / 60.0 : Math.Min((ahora - anterior).TotalSeconds, 1 / 20.0);
-        anterior = ahora;
         foreach (var clave in activos.ToList())
         {
             // ponytail-keep: se saltea lo que ya no está. El alLlegar de una animación puede olvidar otras (el mes que se
@@ -74,9 +63,6 @@ static class Resorte
             if (Math.Abs(e.X - e.Destino) < 0.002 && Math.Abs(e.V) < 0.02) Terminar(clave, e);
             else e.Aplicar(e.X);
         }
-        if (activos.Count > 0) return;
-        CompositionTarget.Rendering -= Cuadro;
-        enganchado = false;
     }
 
     static void Terminar(object clave, Estado e)

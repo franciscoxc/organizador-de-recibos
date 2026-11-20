@@ -169,6 +169,38 @@
             <!-- Las iniciales son un parche para los recibos que vuelven sin firmar: a pedido, y se acuerda. -->
             <CheckBox x:Name="estampar" Margin="4,10,0,0" FontSize="13" Content="Estampar las iniciales en la firma"/>
 
+            <!-- Antes de escribir fuera de esta PC (una unidad de red como Z:) se pregunta, con cuántos recibos y dónde.
+                 Sale de la tarjeta; con el sí sigue hacia las fichas, adonde van los recibos, y con el no vuelve a ella. -->
+            <Border x:Name="permisoCaja" Visibility="Collapsed" Margin="0,12,0,2" Padding="14,12,14,12" CornerRadius="10"
+                    BorderThickness="1" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource AccentFillColorDefaultBrush}">
+                <Border.RenderTransform>
+                    <TranslateTransform x:Name="permisoCorrida"/>
+                </Border.RenderTransform>
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="&#xE74E;" FontFamily="{StaticResource Iconos}" FontSize="15" Margin="0,3,10,0"
+                                   VerticalAlignment="Top" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"/>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock x:Name="permisoTitulo" FontFamily="{StaticResource Titulos}" FontSize="15"
+                                       FontWeight="SemiBold" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       AutomationProperties.LiveSetting="Assertive"/>
+                            <TextBlock x:Name="permisoTexto" Margin="0,3,0,0" FontSize="12" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        </StackPanel>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                        <Button x:Name="permisoNo" Content="No guardar" MinWidth="96" Margin="0,0,8,0"/>
+                        <Button x:Name="permisoSi" MinWidth="96" Style="{DynamicResource AccentButtonStyle}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Una ficha por carpeta de empleador: ahí van a parar los recibos que salen de la tarjeta. -->
             <WrapPanel x:Name="fichas" Margin="0,4,0,0"/>
             <TextBlock x:Name="avisos" Margin="4,10,4,0" TextWrapping="Wrap" FontSize="13" Visibility="Collapsed"
@@ -229,15 +261,18 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- El mes: las flechas lo corren y el nombre viaja hacia el lado del clic. -->
+                <!-- El mes: las flechas lo corren y el nombre viaja hacia el lado del clic. A la derecha, revisar de nuevo y la
+                     carpeta de los clientes. La carpeta va acá y no al lado de las pestañas: es solo de esta vista, y arriba,
+                     con «Reiniciar para actualizar» estirado, quedaban 21 px libres. -->
                 <Grid Height="46" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="44"/>
                         <ColumnDefinition/>
                         <ColumnDefinition Width="44"/>
                         <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="44"/>
                     </Grid.ColumnDefinitions>
-                    <Border Grid.ColumnSpan="4" CornerRadius="12" BorderThickness="1"
+                    <Border Grid.ColumnSpan="5" CornerRadius="12" BorderThickness="1"
                             Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"/>
                     <Button x:Name="mesAntes" Style="{StaticResource Icono}" AutomationProperties.Name="Mes anterior">
@@ -252,6 +287,19 @@
                         <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Iconos}" FontSize="13" RenderTransformOrigin="0.5,0.5">
                             <TextBlock.RenderTransform>
                                 <RotateTransform x:Name="reRevisarGiro"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Button>
+                    <!-- La carpeta de los clientes: se elige una vez y se cambia acá. Al pasar por encima dice cuál se usa. -->
+                    <Button x:Name="cambiarRaiz" Grid.Column="4" Style="{StaticResource Icono}"
+                            AutomationProperties.Name="Cambiar la carpeta de los clientes" ToolTip="Elegir la carpeta de los clientes">
+                        <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource Iconos}" FontSize="14" RenderTransformOrigin="0.5,0.7">
+                            <TextBlock.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="cambiarRaizEscala"/>
+                                    <RotateTransform x:Name="cambiarRaizGiro"/>
+                                    <TranslateTransform x:Name="cambiarRaizAltura"/>
+                                </TransformGroup>
                             </TextBlock.RenderTransform>
                         </TextBlock>
                     </Button>

@@ -35,6 +35,8 @@ public class ClientesTests(ITestOutputHelper salida)
         Assert.Equal(@"D:\CLIENTES", Clientes.RaizDelAnio(@"D:\CLIENTES", 2027));
         // Un número más largo que termina en un año no es un año.
         Assert.Equal(@"D:\0 - ESTUDIO 2027\LEGAJO 12026", Clientes.RaizDelAnio(@"D:\0 - ESTUDIO 2026\LEGAJO 12026", 2027));
+        // Otro año más arriba en la ruta es parte de un nombre: se cambia solo el de la carpeta de los clientes.
+        Assert.Equal(@"D:\ESTUDIO 2019\CLIENTES 2027", Clientes.RaizDelAnio(@"D:\ESTUDIO 2019\CLIENTES 2026", 2027));
     }
 
     [Fact]
@@ -46,6 +48,24 @@ public class ClientesTests(ITestOutputHelper salida)
         Assert.Null(Clientes.PorNombre("GOMEZ legajo 3", nomina));
         Assert.Null(Clientes.PorNombre("PABLO", nomina));
         Assert.Equal(Gomez, Clientes.PorNombre("GÓMEZ LUCÍA", nomina));
+    }
+
+    // Las palabras que ya tienen dueño en la hoja (el empleador del encabezado, y quien está por su CUIL) no alcanzan
+    // para decir que también está otro.
+    [Fact]
+    public void Las_palabras_que_ya_tienen_dueno_no_nombran_a_otro()
+    {
+        Empleado maria = new("27-23456789-1", "GOMEZ MARIA"), jose = new("27-34567890-0", "GOMEZ MARIA JOSE");
+        // El recibo de María, leído con su CUIL: María José no está ahí, aunque sus dos primeras palabras sí.
+        Assert.Empty(Clientes.Nombrados("GOMEZ, MARIA CUIL 27-23456789-1", [maria, jose], [maria.Cuil]));
+        // Las dos en la misma hoja, escaneadas de a dos: «JOSE» no es de María, así que María José también está.
+        Assert.Equal([jose], Clientes.Nombrados("GOMEZ, MARIA CUIL 27-23456789-1 GOMEZ, MARIA JOSE CUIL 27-3?5?7890-", [maria, jose], [maria.Cuil]));
+
+        // El hijo del empleador, con su apellido y uno de sus nombres: en el recibo de López está López, no él...
+        Empleado hijo = new("20-45678901-4", "PEREZ JUAN PABLO");
+        Assert.Equal([Lopez], Clientes.Nombrados("PEREZ JUAN CARLOS CUIT 30-71234567-1 LOPEZ, ANA", [hijo, Lopez], [], "PEREZ JUAN CARLOS"));
+        // ...pero sí en el suyo, que trae además «PABLO».
+        Assert.Equal([hijo], Clientes.Nombrados("PEREZ JUAN CARLOS CUIT 30-71234567-1 PEREZ, JUAN PABLO", [hijo, Lopez], [], "PEREZ JUAN CARLOS"));
     }
 
     [Fact]
@@ -381,19 +401,26 @@ public class ClientesTests(ITestOutputHelper salida)
             // El recibo sin firmar de cada uno sale del PDF de todos juntos; el resumen no cuenta, y Ruiz no tiene.
             Assert.Equal([1, 2, 3], r.Renglones.Take(3).Select(x => Assert.Single(x.SinFirmar).Hoja));
             Assert.Empty(r.Renglones[3].SinFirmar);
+            // De esos recibos sale también cómo se llama el empleador, que está en el encabezado de todos.
+            Assert.All(r.Renglones.Take(3), x => Assert.Equal("PEREZ JUAN", x.SinFirmar[0].Lectura.Empleador));
 
             // La segunda revisión sale de la memoria: un OCR que falla no se llega a usar.
             LeerImagen roto = (_, _, _) => throw new InvalidOperationException("no debería leer de nuevo");
             var otra = await Clientes.Revisar(cliente, 10, 2026, null, roto, memoria, _ => { }, CancellationToken.None);
             Assert.Equal(r.Renglones.Select(x => x.Firma), otra.Renglones.Select(x => x.Firma));
 
-            // Un archivo que ya existe con el nombre de destino no se pisa: Rojas ya tiene el suyo.
+            // Un archivo que ya existe con el nombre de destino no se pisa: ni se propone.
             var firmados = r.Firmados!;
-            File.WriteAllText(Path.Combine(firmados, "ROJAS PABLO 10 2026.pdf"), "de otro");
+            var ocupado = Path.Combine(firmados, "GOMEZ LUCIA 10 2026.pdf");
+            File.WriteAllText(ocupado, "de otro");
+            Assert.DoesNotContain(Clientes.Planear(r, new HashSet<string>()), e => e.Ruta == ocupado);
+            File.Delete(ocupado);
             var plan = Clientes.Planear(r, new HashSet<string> { Lopez.Cuil, Ruiz.Cuil });
             Assert.All(plan, e => Assert.False(File.Exists(e.Ruta)));
             Assert.Equal(
             [
+                // A Rojas se lo encontró solo por el nombre: su foto no se guarda corregida. Ese PDF llevaría su CUIL y,
+                // en la revisión siguiente, pasaría por firmado sin que nadie hubiera mirado la suposición.
                 (Accion.Corregido, "GOMEZ LUCIA 10 2026.pdf"),
                 (Accion.Iniciales, "LOPEZ ANA 10 2026.pdf"), // Ruiz no tiene recibo sin firmar: no hay sobre qué estampar
                 (Accion.Lista, "FALTAN RECIBOS FIRMADOS 10 2026.txt"),
@@ -406,7 +433,6 @@ public class ClientesTests(ITestOutputHelper salida)
             var jpeg = await WindowsOcr.Jpeg(Enumerable.Repeat((byte)200, 8 * 6 * 4).ToArray(), 8, 6);
             Corregir corregir = h => Task.FromResult((jpeg, 8, 6));
             foreach (var e in plan.Where(e => e.Accion != Accion.Lista)) await Clientes.Escribir(e, r, corregir);
-            Assert.Equal("de otro", File.ReadAllText(Path.Combine(firmados, "ROJAS PABLO 10 2026.pdf")));
 
             using (var d = PdfDocument.Open(plan[1].Ruta))
             {
@@ -418,7 +444,8 @@ public class ClientesTests(ITestOutputHelper salida)
             // Si mientras tanto apareció el archivo, falla en vez de pisarlo.
             await Assert.ThrowsAsync<IOException>(() => Clientes.Escribir(plan[1], r, corregir));
 
-            // La lista se escribe con el cliente revisado de nuevo: López ya tiene las iniciales del estudio.
+            // La lista se escribe con el cliente revisado de nuevo: López ya tiene las iniciales del estudio, y Rojas
+            // sigue para revisar, también en la lista.
             var nueva = await Clientes.Revisar(cliente, 10, 2026, null, Leer, memoria, _ => { }, CancellationToken.None);
             Assert.Equal([Firma.Firmado, Firma.PorNombre, Firma.ConIniciales, Firma.Falta], nueva.Renglones.Select(x => x.Firma));
             await Clientes.Escribir(plan[^1], nueva, corregir);
@@ -426,6 +453,7 @@ public class ClientesTests(ITestOutputHelper salida)
             salida.WriteLine(lista);
             Assert.Contains("Falta 1:", lista);
             Assert.Contains(Ruiz.Cuil, lista);
+            Assert.Contains($"ROJAS PABLO · CUIL {Rojas.Cuil}", lista[lista.IndexOf("Encontrados por el nombre")..]);
             Assert.Contains("WhatsApp Image 3.jpeg", lista);
 
             // Con todo guardado, una revisión nueva no propone nada más que lo que sigue faltando: ni un archivo repetido.
@@ -499,6 +527,44 @@ public class ClientesTests(ITestOutputHelper salida)
         }
     }
 
+    // La versión 1.1.0 guardaba todo en una sola memoria. La de un mes arranca con lo que esa tenía leído con OCR de ese
+    // mes: las fotos no se leen de nuevo. Lo demás se relee.
+    [Fact]
+    public void La_memoria_de_un_mes_hereda_las_lecturas_con_ocr_de_la_anterior()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            string octubre = Directory.CreateDirectory(Path.Combine(raiz, "PEREZ SUELDOS OCTUBRE 2026")).FullName,
+                noviembre = Directory.CreateDirectory(Path.Combine(raiz, "PEREZ SUELDOS NOVIEMBRE 2026")).FullName;
+            FileInfo Archivo(string carpeta, string nombre)
+            {
+                File.WriteAllText(Path.Combine(carpeta, nombre), "x");
+                return new FileInfo(Path.Combine(carpeta, nombre));
+            }
+            FileInfo foto = Archivo(octubre, "foto.jpeg"), recibos = Archivo(octubre, "RECIBOS.pdf"), otra = Archivo(noviembre, "foto.jpeg");
+            var anterior = new Memoria(Path.Combine(raiz, "lecturas-3.json"));
+            anterior.Anotar(foto, "", [new Lectura("CUIL 20-12345678-6", Ocr: true, Giro: 90)]);
+            anterior.Anotar(recibos, "", [new Lectura("FIRMA DEL EMPLEADO", Nombre: "PEREZ JUAN")]);
+            anterior.Anotar(otra, "", [new Lectura("CUIL 20-45678901-4", Ocr: true)]);
+            anterior.Guardar();
+
+            var delMes = new Memoria(Path.Combine(raiz, "lecturas-4-2026-10.json"), Path.Combine(raiz, "lecturas-3.json"),
+                ruta => Path.GetDirectoryName(ruta)!.Split('\\', '/').Any(c => Clientes.EsDelMes(c, 10, 2026)));
+            // La foto de octubre viene con su giro; el PDF con texto se relee (así trae el empleador), y noviembre no es de acá.
+            Assert.Equal(90, delMes.Buscar(foto)!.Hojas[0].Giro);
+            Assert.Null(delMes.Buscar(recibos));
+            Assert.Null(delMes.Buscar(otra));
+
+            // Una vez guardada la del mes, manda ella: lo que se anote después en la anterior ya no entra.
+            delMes.Guardar();
+            anterior.Anotar(recibos, "", [new Lectura("otra cosa", Ocr: true)]);
+            anterior.Guardar();
+            Assert.Null(new Memoria(Path.Combine(raiz, "lecturas-4-2026-10.json"), Path.Combine(raiz, "lecturas-3.json"), _ => true).Buscar(recibos));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
     [Fact]
     public async Task Crea_la_carpeta_de_firmados_solo_si_hay_que_guardar_algo()
     {
@@ -523,11 +589,109 @@ public class ClientesTests(ITestOutputHelper salida)
             var nueva = await Clientes.Revisar(cliente, 10, 2026, null, Leer, memoria, _ => { }, CancellationToken.None);
             Assert.Equal(plan[0].Ruta, nueva.Firmados);
             Assert.Equal(Firma.ConIniciales, nueva.Renglones[0].Firma);
+
+            // Si después llega una foto donde se la encuentra solo por el nombre, queda para revisar: las iniciales del
+            // estudio no la vuelven firmada.
+            File.WriteAllBytes(Path.Combine(nueva.Firmados!, "foto.jpeg"), [0xFF, 0xD8]);
+            LeerImagen sinCuil = (_, _, _) => Task.FromResult(new Lectura("APELLIDO Y NOMBRE GOMEZ, LUCIA", Ocr: true));
+            var conFoto = await Clientes.Revisar(cliente, 10, 2026, null, sinCuil, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(Firma.PorNombre, conFoto.Renglones[0].Firma);
+            Assert.DoesNotContain(Clientes.Planear(conFoto, new HashSet<string>()), e => e.Accion == Accion.Corregido);
         }
         finally
         {
             Directory.Delete(raiz, true);
         }
+    }
+
+    [Fact]
+    public async Task El_apellido_del_empleador_y_el_nombre_de_un_companero_no_son_otro_empleado()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // En la nómina hay además un Pérez Luis: el apellido del empleador (Pérez Juan) y el nombre de Ruiz.
+            var perez = new Empleado("20-12345678-6", "PEREZ LUIS");
+            Pdf(Path.Combine(Mes(cliente), "SUSS Y SIND", "PEREZ JUAN SUSS NOMINA 10 2026.pdf"), Nomina(Gomez, Rojas, Ruiz, perez));
+            File.WriteAllBytes(Path.Combine(Firmados(cliente), "RUIZ.jpeg"), [0xFF, 0xD8]);
+            // El recibo firmado de Ruiz, con el empleador en el encabezado, como todos.
+            LeerImagen foto = (_, _, _) => Task.FromResult(new Lectura($"PEREZ JUAN CUIT {Empleador} APELLIDO Y NOMBRE RUIZ, LUIS CUIL {Ruiz.Cuil}", Ocr: true));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, foto, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            Assert.Equal(Firma.Firmado, r.Renglones.Single(x => x.Empleado == Ruiz).Firma);
+            // A Pérez Luis le falta su recibo: en el de Ruiz, «PEREZ» es del empleador y «LUIS» es de Ruiz.
+            Assert.Equal(Firma.Falta, r.Renglones.Single(x => x.Empleado == perez).Firma);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    // ---- Separar ----
+
+    [Fact]
+    public async Task Separar_no_junta_a_dos_que_se_llaman_igual()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            // Dos Gómez Lucía con distinto CUIL, y López, que no tiene tocayo.
+            var otra = Rojas with { Nombre = Gomez.Nombre };
+            var pdf = Path.Combine(raiz, "RECIBOS 10 2026.pdf");
+            Pdf(pdf, Recibo(Gomez), Recibo(otra), Recibo(Lopez));
+            var r = await Recibos.Procesar([pdf], null, _ => { }, iniciales: false);
+            // Cada una en su archivo, con el CUIL en el nombre para distinguirlas; López, como siempre.
+            Assert.Equal(new[] { $"GOMEZ LUCIA {Gomez.Cuil} 10 2026.pdf", $"GOMEZ LUCIA {otra.Cuil} 10 2026.pdf", "LOPEZ ANA 10 2026.pdf" }.Order(),
+                r.Creados.Select(Path.GetFileName).Order());
+            foreach (var creado in r.Creados)
+            {
+                using var d = PdfDocument.Open(creado);
+                Assert.Equal(1, d.NumberOfPages);
+            }
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Separar_pregunta_antes_de_escribir_y_no_pisa_lo_que_ya_estaba()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var pdf = Path.Combine(raiz, "RECIBOS 10 2026.pdf");
+            Pdf(pdf, Recibo(Gomez), Recibo(Lopez));
+            var carpeta = Path.Combine(raiz, "PEREZ JUAN");
+            IReadOnlyList<string> pedidos = [];
+            Func<IReadOnlyList<string>, Task<bool>> Responde(bool si) => rutas =>
+            {
+                pedidos = rutas;
+                return Task.FromResult(si);
+            };
+
+            // Si dicen que no, no se escribe nada: ni la carpeta del empleador.
+            var nada = await Recibos.Procesar([pdf], null, _ => { }, iniciales: false, permiso: Responde(false));
+            Assert.Equal(["GOMEZ LUCIA 10 2026.pdf", "LOPEZ ANA 10 2026.pdf"], pedidos.Select(Path.GetFileName));
+            Assert.Empty(nada.Creados);
+            Assert.False(Directory.Exists(carpeta));
+
+            // El de Gómez ya estaba, puesto por otro: queda como está, y el permiso se pide solo por el de López.
+            Directory.CreateDirectory(carpeta);
+            var deOtro = Path.Combine(carpeta, "GOMEZ LUCIA 10 2026.pdf");
+            File.WriteAllText(deOtro, "de otro");
+            var r = await Recibos.Procesar([pdf], null, _ => { }, iniciales: false, permiso: Responde(true));
+            Assert.Equal(["LOPEZ ANA 10 2026.pdf"], pedidos.Select(Path.GetFileName));
+            Assert.Equal([deOtro], r.YaEstaban);
+            Assert.Equal("de otro", File.ReadAllText(deOtro));
+            var deLopez = Assert.Single(r.Creados);
+            Assert.Equal(Path.Combine(carpeta, "LOPEZ ANA 10 2026.pdf"), deLopez);
+
+            // Otra vez, ahora con iniciales: los dos ya están, así que no hay nada que escribir ni que preguntar, y el
+            // de López sigue sin iniciales.
+            var antes = File.ReadAllBytes(deLopez);
+            var otra = await Recibos.Procesar([pdf], null, _ => { }, permiso: _ => throw new InvalidOperationException("no hay nada que preguntar"));
+            Assert.Empty(otra.Creados);
+            Assert.Equal(2, otra.YaEstaban.Count);
+            Assert.Equal(antes, File.ReadAllBytes(deLopez));
+        }
+        finally { Directory.Delete(raiz, true); }
     }
 
     // Con el OCR de la app sobre clientes reales: si junto al proyecto hay una carpeta «prueba-clientes» (copia de

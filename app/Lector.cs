@@ -32,7 +32,7 @@ static class Lector
         var libres = new ConcurrentBag<RapidOcr>();
         async Task<Lectura> Con(Func<RapidOcr, byte[], int, int, Func<string, bool>, Lectura> leer, string ruta, int hoja, Func<string, bool> buscado)
         {
-            var (px, ancho, alto) = await WindowsOcr.Cargar(ruta, hoja, 3000, agrandar: false);
+            var (px, ancho, alto) = await WindowsOcr.Cargar(ruta, hoja, 3000);
             if (!libres.TryTake(out var motor))
             {
                 motor = new RapidOcr();
@@ -144,7 +144,7 @@ static class Lector
         }
         catch
         {
-            return null; // sin los modelos queda el OCR de Windows (ver RevisarClientes)
+            return null; // sin los modelos, las fotos y los escaneos quedan sin leer, y se avisa (ver RevisarClientes)
         }
     }
 }

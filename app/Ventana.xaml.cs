@@ -20,7 +20,8 @@ public partial class Ventana : Window
 
     readonly string[] startupFiles;
     readonly Ocr? ocr = CrearOcr();
-    bool working, buscando, anticipando, cartelVisible;
+    bool working, escribiendo, buscando, anticipando, cartelVisible;
+    TaskCompletionSource<bool>? permiso; // la pregunta de guardar fuera de esta PC, mientras está abierta
     string? nuevoExe; // descargado y verificado: reemplaza al actual al reiniciar
     DateTime ultimaBusqueda; // «Revisar de nuevo» busca versión nueva una vez por hora como mucho
     Nomina? nomina; // la última leída: si después llegan recibos de ese mes, se vuelve a revisar
@@ -62,6 +63,25 @@ public partial class Ventana : Window
         // Se ve solo cuando hay una versión nueva; mientras se baja, tocarlo no hace nada.
         actualizar.Click += (_, _) => { if (nuevoExe is not null) Reiniciar(); };
         tarjeta.Click += async (_, _) => await Pick();
+        permisoSi.Click += (_, _) => Responder(true);
+        permisoNo.Click += (_, _) => Responder(false);
+        // Cerrar a mitad de un guardado dejaba un PDF cortado con nombre de recibo, y como la app no pisa nada, nadie lo
+        // reemplazaba después. La ventana espera a que termine, y lo dice sacudiéndose. Con la pregunta abierta todavía
+        // no se escribió nada: cerrar es decir que no.
+        Closing += (_, e) =>
+        {
+            if (permiso is not null) Responder(false);
+            else if (guardando)
+            {
+                e.Cancel = true;
+                Resorte.Animar((panelCaja, "x"), 0, v => panelCorrida.X = v, velocidad: 700, rigidez: 900, rebote: 0.85);
+            }
+            else if (escribiendo)
+            {
+                e.Cancel = true;
+                Sacudir();
+            }
+        };
         // Lo que va a pasar se insinúa: la tarjeta cede bajo el puntero antes de abrir el diálogo.
         tarjeta.PreviewMouseLeftButtonDown += (_, _) => Escalar(0.985);
         tarjeta.PreviewMouseLeftButtonUp += (_, _) => Escalar(anticipando ? 1.02 : 1);
@@ -128,10 +148,18 @@ public partial class Ventana : Window
         SacarFichas();
         Estado(files.Length == 1 ? $"Leyendo {Path.GetFileName(files[0])}…" : $"Leyendo {files.Length} PDF…");
         var problems = new List<string>();
-        var r = new Resultado([], []);
+        var r = new Resultado([], [], []);
         var iniciales = estampar.IsChecked == true; // se lee acá: la casilla no se puede tocar desde otro hilo
+        var negado = false;
         try
         {
+            // La pregunta se hace en el hilo de la ventana; Procesar espera la respuesta en el suyo.
+            async Task<bool> Permiso(IReadOnlyList<string> rutas)
+            {
+                var si = await await Dispatcher.InvokeAsync(() => PedirPermiso(rutas));
+                negado = !si;
+                return si;
+            }
             // El OCR de Windows es asíncrono, pero el armado de los PDF no: afuera del hilo de la ventana.
             // Invoke y no BeginInvoke: un aviso en cola llegaría después de mostrar el resultado y se perdería.
             r = await Task.Run(() => Recibos.Procesar(files, ocr, msg => Dispatcher.Invoke(() =>
@@ -139,17 +167,29 @@ public partial class Ventana : Window
                 if (msg.StartsWith('⚠')) problems.Add(msg[2..]);
                 else if (msg.StartsWith('✓')) Separado(msg[2..]);
                 else Estado(msg);
-            }), iniciales: iniciales));
-            RecordarCarpetas(r.Creados);
+            }), iniciales: iniciales, permiso: Permiso));
+            escribiendo = false; // lo que sigue solo lee: ya se puede cerrar
+            RecordarCarpetas([.. r.Creados, .. r.YaEstaban]);
             foreach (var f in r.Creados) FichaDe(f).Archivo ??= f;
+            // Los que ya estaban separados no vuelan, porque no se escribieron, pero están: su ficha los cuenta.
+            foreach (var f in r.YaEstaban)
+            {
+                var ficha = FichaDe(f);
+                ficha.Archivo ??= f;
+                ficha.Llegados++;
+                Contar(ficha);
+            }
+            if (r.YaEstaban.Count > 0)
+                problems.Add(r.YaEstaban.Count == 1 ? "1 recibo ya estaba separado y no lo reemplacé. Para rehacerlo, borrá antes el viejo."
+                    : $"{r.YaEstaban.Count} recibos ya estaban separados y no los reemplacé. Para rehacerlos, borrá antes los viejos.");
             if (r.Nominas.Count > 0) nomina = r.Nominas[^1];
             // Se revisa si llegó una nómina, o si llegaron recibos del mes de la que ya estaba cargada.
-            if (nomina is { } n && (r.Nominas.Count > 0 || r.Creados.Any(c => c.EndsWith(Recibos.Sufijo(n), StringComparison.OrdinalIgnoreCase))))
+            if (nomina is { } n && (r.Nominas.Count > 0 || r.Creados.Concat(r.YaEstaban).Any(c => c.EndsWith(Recibos.Sufijo(n), StringComparison.OrdinalIgnoreCase))))
             {
                 Estado("Revisando la nómina…");
                 var revision = await Task.Run(() => Recibos.Revisar(n, CarpetasParaRevisar(n)));
-                // Sin recibos nuevos, la ficha es la de la carpeta donde están los de la nómina.
-                if (r.Creados.Count == 0)
+                // Sin recibos de esta tanda, la ficha es la de la carpeta donde están los de la nómina.
+                if (r.Creados.Count == 0 && r.YaEstaban.Count == 0)
                     foreach (var recibo in revision.Select(x => x.Recibo).OfType<string>())
                     {
                         var f = FichaDe(recibo);
@@ -167,11 +207,12 @@ public partial class Ventana : Window
         }
         finally
         {
-            working = false;
+            working = escribiendo = false;
             Estado("");
         }
 
-        if (r.Creados.Count == 0 && r.Nominas.Count == 0 && problems.Count == 0) problems.Add("No separé ningún recibo");
+        // Si dijo que no guardara, no hay nada que avisar: es lo que pidió.
+        if (r.Creados.Count == 0 && r.Nominas.Count == 0 && problems.Count == 0 && !negado) problems.Add("No separé ningún recibo");
         if (problems.Count == 0) return;
         Avisar(problems.Count == 1 ? problems[0] : $"{problems[0]}\n(y {problems.Count - 1} avisos más)");
         Sacudir();
@@ -201,6 +242,62 @@ public partial class Ventana : Window
         if (Math.Abs(arriba - Top) > 0.5)
             Resorte.Animar((this, "arriba"), arriba, v => Top = v, desde: Top, rigidez: 170, rebote: 0.08);
     });
+
+    // ---- El permiso para guardar fuera de esta PC ----
+
+    // Todo lo que no es un disco fijo de esta PC: una unidad de red (Z:), una carpeta \\servidor\… o un disco que se saca.
+    static bool FueraDeLaPc(string ruta)
+    {
+        try { return Path.GetPathRoot(Path.GetFullPath(ruta)) is not { Length: > 0 } raiz || raiz.StartsWith(@"\\") || new DriveInfo(raiz).DriveType != DriveType.Fixed; }
+        catch { return true; } // si no se puede saber, se pregunta
+    }
+
+    // «Z:» si la ruta está en una unidad; si es una carpeta de red (\\servidor\…), cómo llamarla.
+    static string Unidad(string? ruta, string deRed) =>
+        ruta is not null && Path.GetPathRoot(ruta) is { Length: > 0 } u && !u.StartsWith(@"\\") ? u.TrimEnd('\\') : deRed;
+
+    // Separar en un disco de esta PC es lo que se pidió al soltar los PDF. Afuera (las carpetas de los clientes están en
+    // Z:) nada se escribe sin preguntar: debajo de la tarjeta sale cuántos recibos son y dónde van, y se espera el clic.
+    Task<bool> PedirPermiso(IReadOnlyList<string> rutas)
+    {
+        if (rutas.FirstOrDefault(FueraDeLaPc) is not { } afuera)
+        {
+            escribiendo = true;
+            return Task.FromResult(true);
+        }
+        var donde = Unidad(afuera, "la carpeta de red");
+        var carpeta = Path.GetDirectoryName(afuera)!;
+        var madre = Path.GetFileName(Path.GetDirectoryName(carpeta));
+        var otras = rutas.Select(Path.GetDirectoryName).Distinct(StringComparer.OrdinalIgnoreCase).Count() - 1;
+        permisoTitulo.Text = rutas.Count == 1 ? $"¿Guardo 1 recibo en {donde}?" : $"¿Guardo {rutas.Count} recibos en {donde}?";
+        permisoTexto.Text = $"En la carpeta «{Path.GetFileName(carpeta)}»"
+            + (string.IsNullOrEmpty(madre) ? "" : $", adentro de «{madre}»")
+            + (otras == 0 ? "" : otras == 1 ? ", y en 1 carpeta más" : $", y en {otras} carpetas más")
+            + ". No se reemplaza ningún archivo: lo que ya existe queda como está.";
+        permisoTexto.ToolTip = carpeta;
+        permisoSi.Content = $"Guardar en {donde}";
+        permisoCaja.Visibility = Visibility.Visible;
+        Estado("");
+        Aparecer(permisoCaja, permisoCorrida, desdeY: -14);
+        Encuadrar();
+        // RunContinuationsAsynchronously: sin eso, lo que sigue a la respuesta (armar y escribir todos los PDF) corre
+        // adentro del clic, en el hilo de la ventana, y la deja dura hasta que termina.
+        return (permiso = new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+    }
+
+    void Responder(bool si)
+    {
+        if (permiso is not { } pregunta) return;
+        permiso = null;
+        escribiendo = si;
+        pregunta.SetResult(si);
+        // Con el sí sigue hacia las fichas, adonde van a llegar los recibos; con el no vuelve a la tarjeta, por donde vino.
+        Resorte.Animar((permisoCaja, "y"), si ? 12 : -14, v => permisoCorrida.Y = v, rigidez: 260);
+        Opacidad(permisoCaja, 0, alTerminar: () =>
+        {
+            if (permiso is null) permisoCaja.Visibility = Visibility.Collapsed;
+        });
+    }
 
     // ---- La tarjeta ----
 
@@ -669,7 +766,12 @@ public partial class Ventana : Window
 
     void Reiniciar()
     {
-        if (working) return; // no cortar una separación a la mitad
+        // Ni una separación ni un guardado se cortan a la mitad: quedaría un archivo a medio escribir.
+        if (working || guardando)
+        {
+            Burbuja(guardando ? "Esperá a que termine de guardar" : "Esperá a que termine de separar");
+            return;
+        }
         try
         {
             Actualizador.Reemplazar(nuevoExe!);

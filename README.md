@@ -11,7 +11,8 @@ del estudio.
 ## Qué deja
 
 - Un PDF por empleado y mes, con el nombre `APELLIDO NOMBRE MM AAAA.pdf`
-  (por ejemplo `PEREZ JUAN 07 2026.pdf`).
+  (por ejemplo `PEREZ JUAN 07 2026.pdf`). Si dos empleados se llaman igual,
+  cada archivo lleva además el CUIL.
 - Si está marcada la casilla «Estampar las iniciales en la firma», las iniciales
   del empleado sobre «FIRMA DEL EMPLEADO» (por ejemplo `P.J.`), en negro y con
   Segoe Print, la letra manuscrita que trae Windows. Si un recibo ocupa dos hojas,
@@ -19,6 +20,10 @@ del estudio.
   recuerda cómo la dejaste.
 - Todo dentro de una carpeta con el nombre del empleador, al lado de los PDF
   originales.
+- Nunca reemplaza un archivo: si un recibo ya estaba separado, lo deja como
+  está y lo avisa. Para rehacerlo, borra antes el viejo.
+- Si los PDF están fuera de la PC (una unidad de red como `Z:`), antes de
+  guardar pregunta: dice cuántos recibos son y en qué carpeta van.
 
 ## Cómo se usa
 
@@ -75,7 +80,9 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   no encontró a nadie: las gira si vinieron de costado, las agranda y les sube el
   contraste. Para reconocer al empleado le alcanzan los primeros diez dígitos del
   CUIL, porque la cajita del recibo suele tapar el último. Si el CUIL no se lee,
-  lo busca por el nombre, en el texto o en el nombre del archivo. Si se lee con
+  lo busca por el nombre, en el texto o en el nombre del archivo. Las palabras
+  del nombre del empleador, que encabeza todos los recibos, y las de quien ya
+  está en la hoja por su CUIL no alcanzan para decir que hay alguien más. Si se lee con
   uno o dos dígitos cambiados, como pasa en las fotos movidas, alcanza con que
   también esté el nombre. Los que encuentra así quedan marcados «ilegible,
   revisar», y en la lista de clientes dice cuántos hay. Una hoja escaneada puede
@@ -96,7 +103,9 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   se puede mirar antes de guardar, y en la lista quedan como «con iniciales».
 - Lo leído se recuerda: la segunda revisión lee solo lo nuevo.
 - La carpeta de los clientes se elige una sola vez y queda guardada en esa PC. Si
-  su ruta nombra el año, al pasar a otro año la app busca la del año nuevo.
+  su ruta nombra el año, al pasar a otro año la app busca la del año nuevo. Para
+  elegir otra, la carpetita de la barra del mes; al pasar por encima dice cuál se
+  está usando.
 
 Nada se escribe en las carpetas de los clientes sin permiso. «Guardar» abre en el
 panel de la derecha la lista exacta de lo que va a guardar y espera un segundo
@@ -105,7 +114,9 @@ clic:
 - Un PDF por empleado con su recibo firmado derecho, con más contraste y con el
   nombre de siempre, en la carpeta de los firmados. Cuando el nombre cambia (la
   foto se llamaba `IMG_2034.jpg`), un lápiz al lado del empleado lo avisa. La
-  foto original queda como estaba, con su nombre.
+  foto original queda como estaba, con su nombre. Los que encontró solo por el
+  nombre («ilegible, revisar») no se guardan así: ese PDF llevaría su CUIL y
+  después contaría como firmado, sin que nadie lo hubiera mirado.
 - Las iniciales del estudio, solo en los recibos que elijas, entre los que no
   volvieron firmados: una copia del recibo sin firmar con las iniciales, en la
   carpeta de los firmados. En la lista quedan como «con iniciales», no como
@@ -117,7 +128,8 @@ clic:
 Todo va a la carpeta de los firmados, que es lo que manda el cliente. Los recibos
 sin firmar, los que arma el estudio para mandarle, no se tocan ni se separan: la
 app solo los lee. Nunca reemplaza ni borra un archivo: si ya existe uno con ese
-nombre, lo deja como está.
+nombre, lo deja como está. Mientras guarda, la ventana no se cierra: espera a
+terminar, para no dejar un archivo a medio escribir.
 
 ## Descargar
 

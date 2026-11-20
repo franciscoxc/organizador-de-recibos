@@ -16,8 +16,13 @@ public partial class Ventana
 {
     static readonly string RaizFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName, "raiz.txt");
     static readonly string SinInicialesFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName, "sin iniciales");
-    // El número cambia con el OCR, para no reusar lo que leyó el anterior: 3 es PP-OCRv6.
-    static readonly string MemoriaFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, "lecturas-3.json");
+    // Una memoria por mes: con una sola para todo, el archivo crecía sin fin (cada mes sumaba el texto de todos sus PDF)
+    // y se reescribía entero después de cada cliente. El número cambia cuando lo guardado antes ya no sirve: 3 fue
+    // PP-OCRv6, y desde el 4 cada recibo guarda también cómo nombra al empleador.
+    static string MemoriaFile(int mes, int anio) =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, $"lecturas-4-{anio}-{mes:00}.json");
+    // La de la versión 1.1.0, una sola para todos los meses: de ahí salen, la primera vez, las lecturas de cada mes.
+    static readonly string MemoriaAnterior = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, "lecturas-3.json");
     // Rojo: falta el recibo. Amarillo (el de la carpeta del ícono, con la marca oscura para que se lea): está el recibo
     // y falta la firma. Azul: todavía se está leyendo. Violeta: lo firmó el estudio con las iniciales.
     static readonly SolidColorBrush Amarillo = new(Color.FromRgb(0xEB, 0xB4, 0x1C)), TintaOscura = new(Color.FromRgb(0x3D, 0x2C, 0x00)),
@@ -34,6 +39,7 @@ public partial class Ventana
     CancellationTokenSource? corteClientes;
     TextBlock? mesActual;
     Memoria? memoria;
+    (int Mes, int Anio) memoriaDe; // el mes de esa memoria
     LeerImagen? lector, lectorAFondo; // la lectura rápida, para todo, y a fondo, para las hojas difíciles
     string? raizElegida, raizActual;
     readonly Dictionary<string, FilaCliente> porCliente = new(StringComparer.OrdinalIgnoreCase);
@@ -99,6 +105,10 @@ public partial class Ventana
             if (generacionClientes == antes + 1 && DateTime.Now - ultimaBusqueda > TimeSpan.FromHours(1)) await BuscarActualizacion();
         };
         elegirRaiz.Click += (_, _) => ElegirRaiz();
+        cambiarRaiz.Click += (_, _) => ElegirRaiz();
+        // La carpetita hace el gesto de la carpeta grande de la tarjeta cuando le llegan archivos: se inclina y se asoma.
+        cambiarRaiz.MouseEnter += (_, _) => AsomarCarpeta(true);
+        cambiarRaiz.MouseLeave += (_, _) => AsomarCarpeta(false);
         guardar.Click += async (_, _) =>
         {
             if (muestra == Muestra.Guardar) CerrarPanel();
@@ -130,13 +140,16 @@ public partial class Ventana
         SizeChanged += (_, e) => Estirado(e);
         KeyDown += (_, e) =>
         {
-            if (e.Key == Key.Escape && muestra != Muestra.Nada && !guardando) CerrarPanel();
+            if (e.Key != Key.Escape) return;
+            Responder(false); // la pregunta de guardar de Separar, si está abierta
+            if (muestra != Muestra.Nada && !guardando) CerrarPanel();
         };
         // Al apretar, cada control cede un poco. Las flechas del mes, además, empiezan a llevar el nombre hacia el
         // lado por donde se va a ir.
         Hundir(mesAntes, 0.94, si => Insinuar(si ? 8 : 0));
         Hundir(mesDespues, 0.94, si => Insinuar(si ? -8 : 0));
         Hundir(reRevisar, 0.94);
+        Hundir(cambiarRaiz, 0.94);
         Hundir(guardar, 0.98, objetivo: guardarCaja);
         clientesDesplazar.ScrollChanged += (_, _) => Bordes();
         // Mientras no hay revisión terminada, el botón se apaga: encendido parecería que se puede tocar.
@@ -168,6 +181,8 @@ public partial class Ventana
             Resorte.Animar((vistaSeparar, "x"), 0, v => separarCorrida.X = v, desde: 0);
             Resorte.Animar((panel, "ancho"), 0, v => panel.Width = Math.Max(0, v), desde: 0);
             Resorte.Animar((panelCaja, "x"), 0, v => panelCorrida.X = v, desde: 0);
+            Resorte.Animar((cambiarRaiz, "giro"), 0, v => cambiarRaizGiro.Angle = v, desde: 0);
+            Resorte.Animar((cambiarRaiz, "altura"), 0, v => cambiarRaizAltura.Y = v, desde: 0);
         };
     }
 
@@ -438,6 +453,11 @@ public partial class Ventana
         if (g != generacionClientes) return;
         raizActual = raiz;
         guardarTexto.Text = TextoGuardar;
+        // Cuál se está usando, para no tener que adivinarlo: lo dice la carpetita al pasar por encima.
+        cambiarRaiz.ToolTip = raiz is not null ? $"Carpeta de los clientes: {raiz}\nTocala para elegir otra."
+            : esperada is not null ? $"No encuentro {esperada}\nTocala para elegir otra carpeta."
+            : "Elegir la carpeta de los clientes";
+        AutomationProperties.SetHelpText(cambiarRaiz, (string)cambiarRaiz.ToolTip);
         if (raiz is null)
         {
             sinRaizTexto.Text = esperada is null
@@ -449,17 +469,21 @@ public partial class Ventana
             EstadoClientes("");
             return;
         }
-        var mem = memoria ??= await Task.Run(() => new Memoria(MemoriaFile));
+        if (memoria is not { } mem || memoriaDe != (mes, anio))
+        {
+            // De la memoria anterior, lo que está adentro de una carpeta de este mes («… SUELDOS OCTUBRE 2026»).
+            mem = await Task.Run(() => new Memoria(MemoriaFile(mes, anio), MemoriaAnterior,
+                ruta => (Path.GetDirectoryName(ruta) ?? "").Split('\\', '/').Any(carpeta => Clientes.EsDelMes(carpeta, mes, anio))));
+            if (g != generacionClientes) return;
+            (memoria, memoriaDe) = (mem, (mes, anio));
+        }
         if (!lectorCreado)
         {
             lectorCreado = true;
-            try
-            {
-                // RapidOcrNet; si sus modelos no se pudieron preparar, el OCR de Windows, que lee bastante menos.
-                if (await Task.Run(Lector.Crear) is { } rapido) (lector, lectorAFondo) = rapido;
-                else lector = WindowsOcr.Lector();
-            }
-            catch { } // sin OCR se revisan igual los PDF con texto; las fotos quedan sin leer
+            // Si los modelos del OCR no se pudieron preparar (no hay dónde copiarlos), se revisan igual los PDF con
+            // texto; las fotos y los escaneos quedan sin leer, y al terminar se avisa.
+            try { if (await Task.Run(Lector.Crear) is { } lectores) (lector, lectorAFondo) = lectores; }
+            catch { }
         }
         try
         {
@@ -507,7 +531,8 @@ public partial class Ventana
                 Acomodar();
                 CartelClientes();
             }
-            EstadoClientes(clientes.Count == 1 ? $"1 cliente · {TextoMes()}" : $"{clientes.Count} clientes · {TextoMes()}");
+            EstadoClientes(lector is null ? "⚠ No pude preparar el OCR: las fotos quedaron sin leer"
+                : clientes.Count == 1 ? $"1 cliente · {TextoMes()}" : $"{clientes.Count} clientes · {TextoMes()}");
             guardar.IsEnabled = true;
         }
         catch (OperationCanceledException) { }
@@ -532,13 +557,18 @@ public partial class Ventana
     }
 
     // Lo que dicen los botones de guardar: la unidad de la carpeta elegida («Z:»), o la carpeta si es de red.
-    string Donde => raizActual is { } r && Path.GetPathRoot(r) is { Length: > 0 } u && !u.StartsWith(@"\\") ? u.TrimEnd('\\') : "la carpeta de los clientes";
+    string Donde => Unidad(raizActual, "la carpeta de los clientes");
 
     string TextoGuardar => $"Guardar en {Donde}…";
 
     void ElegirRaiz()
     {
+        // Lo que se está guardando, o la lista que se está armando para guardar, es de la carpeta de ahora.
+        if (guardando || planeando) return;
         var d = new Microsoft.Win32.OpenFolderDialog { Title = "Elegí la carpeta donde están las carpetas de los clientes" };
+        // Abre en la que se usa ahora: «Seleccionar carpeta» sin moverse la deja como estaba. Abriendo en la de arriba,
+        // ese mismo clic elegiría la de arriba.
+        if (raizActual is not null) d.InitialDirectory = raizActual;
         if (d.ShowDialog(this) != true) return;
         raizElegida = d.FolderName;
         try
@@ -547,7 +577,15 @@ public partial class Ventana
             File.WriteAllText(RaizFile, d.FolderName);
         }
         catch { } // sin recordarla, vale hasta cerrar la app
+        // La carpetita acusa recibo, y la lista se vacía y se vuelve a llenar con los clientes de la carpeta nueva.
+        Resorte.Animar((cambiarRaiz, "latido"), 1, v => cambiarRaizEscala.ScaleX = cambiarRaizEscala.ScaleY = v, velocidad: 2.5, rigidez: 500, rebote: 0.5);
         _ = RevisarClientes(0);
+    }
+
+    void AsomarCarpeta(bool si)
+    {
+        Resorte.Animar((cambiarRaiz, "giro"), si ? -10 : 0, v => cambiarRaizGiro.Angle = v, rigidez: 300, rebote: 0.3);
+        Resorte.Animar((cambiarRaiz, "altura"), si ? -2 : 0, v => cambiarRaizAltura.Y = v, rigidez: 300, rebote: 0.3);
     }
 
     // ---- Los renglones ----
@@ -1103,7 +1141,7 @@ public partial class Ventana
         var (glifo, color, nota, explica) = x.Firma switch
         {
             Firma.Firmado => (Tilde, Verde, ConBaja(""), baja is null ? "Firmado: su recibo firmado está con los firmados" : "Se fue en el mes: su liquidación final volvió firmada"),
-            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo"),
+            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo. Hasta que se lea su CUIL, su recibo no se guarda corregido"),
             Firma.ConIniciales => (Lapiz, Violeta, ConBaja("con las iniciales del estudio"), "No volvió firmado: tiene las iniciales del estudio"),
             _ when FaltaElRecibo(x) => (Cruz, Rojo, ConBaja($"{(baja is null ? "falta el recibo" : "falta la liquidación final")} · CUIL {x.Empleado.Cuil}"),
                 baja is null ? "Falta el recibo: no está ni firmado ni sin firmar" : "Se fue en el mes: su recibo es la liquidación final, y no está ni firmada ni sin firmar"),
@@ -1349,7 +1387,7 @@ public partial class Ventana
         {
             try
             {
-                var (px, ancho, alto) = await Task.Run(() => WindowsOcr.Cargar(h.Ruta, h.Hoja, 3200, agrandar: false));
+                var (px, ancho, alto) = await Task.Run(() => WindowsOcr.Cargar(h.Ruta, h.Hoja, 3200));
                 (px, ancho, alto) = Retoque.Girar(px, ancho, alto, h.Lectura.Giro);
                 var jpeg = await WindowsOcr.Jpeg(px, ancho, alto);
                 // shortcut: las imágenes temporales no se borran; quedan en la carpeta temporal de Windows, que se limpia sola.
@@ -1366,7 +1404,7 @@ public partial class Ventana
     // afuera del hilo de la ventana.
     static async Task<BitmapSource> Previa(Hallazgo h)
     {
-        var (px, ancho, alto) = await WindowsOcr.Cargar(h.Ruta, h.Hoja, 1400, agrandar: false);
+        var (px, ancho, alto) = await WindowsOcr.Cargar(h.Ruta, h.Hoja, 1400);
         (px, ancho, alto) = Retoque.Girar(px, ancho, alto, h.Lectura.Giro);
         var b = BitmapSource.Create(ancho, alto, 96, 96, PixelFormats.Bgra32, null, px, ancho * 4);
         b.Freeze();
