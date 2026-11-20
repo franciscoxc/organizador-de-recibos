@@ -61,6 +61,29 @@ public class RecibosTests
         Assert.Empty(avisos);
     }
 
+    // La consulta de nómina que baja de AFIP: los CUIL sin guiones y los nombres centrados en su columna, a veces
+    // más anchos que el CUIL (empiezan antes que él).
+    [Fact]
+    public void Lee_la_nomina_de_afip()
+    {
+        Palabra[] ws =
+        [
+            P("CONSULTA", 20, 60, 820), P("DE", 62, 70, 820), P("NÓMINA", 72, 110, 820),
+            P("PERIODO", 400, 440, 800), P("10/2026", 410, 450, 790),
+            P("CUIL", 50, 70, 760), P("20123456786", 170, 230, 760), P("27234567891", 280, 340, 760),
+            P("Suma", 380, 400, 760), P("Totales", 402, 430, 760),
+            P("Apellido", 30, 60, 748), P("y", 62, 64, 748), P("Nombre", 66, 95, 748),
+            P("PABLO", 150, 190, 748), P("TOMAS", 192, 250, 748), P("LOPEZ", 285, 315, 748), P("ANA", 317, 335, 748),
+            P("PEREZ", 185, 215, 738), P("Suma", 380, 400, 748),
+            P("Obra", 30, 50, 725), P("Social", 52, 80, 725),
+        ];
+        var avisos = new List<string>();
+        var (mes, anio, empleados) = Recibos.LeerNomina(ws, avisos.Add);
+        Assert.Equal((10, "2026"), (mes, anio));
+        Assert.Equal([new("20-12345678-6", "PABLO TOMAS PEREZ"), new Empleado("27-23456789-1", "LOPEZ ANA")], empleados);
+        Assert.Empty(avisos);
+    }
+
     static void Recibo(string ruta, string texto, string claves = "")
     {
         var b = new PdfDocumentBuilder();

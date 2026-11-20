@@ -4,16 +4,19 @@
 
 Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
-mes, con las iniciales del empleado sobre la firma. Con la nómina de AFIP, revisa
-además que no falte el recibo de nadie.
+mes. Con la nómina de AFIP, revisa además que no falte el recibo de nadie, y en
+la pestaña Clientes revisa de una vez los recibos firmados de todos los clientes
+del estudio.
 
 ## Qué deja
 
 - Un PDF por empleado y mes, con el nombre `APELLIDO NOMBRE MM AAAA.pdf`
   (por ejemplo `PEREZ JUAN 07 2026.pdf`).
-- Las iniciales del empleado sobre «FIRMA DEL EMPLEADO» (por ejemplo `P.J.`),
-  en negro y con Segoe Print, la letra manuscrita que trae Windows. Si un recibo
-  ocupa dos hojas, quedan juntas en el mismo PDF y las dos llevan las iniciales.
+- Si está marcada la casilla «Estampar las iniciales en la firma», las iniciales
+  del empleado sobre «FIRMA DEL EMPLEADO» (por ejemplo `P.J.`), en negro y con
+  Segoe Print, la letra manuscrita que trae Windows. Si un recibo ocupa dos hojas,
+  quedan juntas en el mismo PDF y las dos llevan las iniciales. La casilla
+  recuerda cómo la dejaste.
 - Todo dentro de una carpeta con el nombre del empleador, al lado de los PDF
   originales.
 
@@ -57,6 +60,51 @@ cuántos recibos faltan.
   se haya separado. Todo se procesa en tu computadora: los recibos no
 salen de ella.
 
+## Revisar todos los clientes
+
+En la pestaña **Clientes**, la app recorre las carpetas de los clientes del
+estudio y, para el mes elegido, revisa que cada empleado de la nómina de AFIP
+tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
+
+- El mes se elige con las flechas. Para cada cliente, la app busca sola la
+  carpeta de ese mes, la nómina (aunque venga partida en varios PDF) y la carpeta
+  de los firmados.
+- Lee los firmados que llegan como foto o escaneados con un OCR que viene
+  adentro de la app, sin instalar nada. Primero hace una lectura rápida de todo,
+  así ya se puede empezar a trabajar; después vuelve sobre las hojas en las que
+  no encontró a nadie: las gira si vinieron de costado, las agranda y les sube el
+  contraste. Para reconocer al empleado le alcanzan los primeros diez dígitos del
+  CUIL, porque la cajita del recibo suele tapar el último. Si el CUIL no se lee,
+  lo busca por el nombre, en el texto o en el nombre del archivo. Si se lee con
+  uno o dos dígitos cambiados, como pasa en las fotos movidas, alcanza con que
+  también esté el nombre. Los que encuentra así quedan marcados «ilegible,
+  revisar», y en la lista de clientes dice cuántos hay.
+- Un renglón por cliente, con los que tienen faltantes arriba. Al tocarlo, a la
+  derecha se abre un panel con sus empleados y los archivos en los que no
+  encontró a nadie de la nómina (una baja, un DNI, una foto ilegible).
+- Lo leído se recuerda: la segunda revisión lee solo lo nuevo.
+- La carpeta de los clientes se elige una sola vez y queda guardada en esa PC. Si
+  su ruta nombra el año, al pasar a otro año la app busca la del año nuevo.
+
+Nada se escribe en las carpetas de los clientes sin permiso. «Guardar» abre en el
+panel de la derecha la lista exacta de lo que va a guardar y espera un segundo
+clic:
+
+- Un PDF por empleado con su recibo firmado derecho y con más contraste, en la
+  carpeta de los firmados. La foto original queda como estaba.
+- Las iniciales del estudio, solo en los recibos que elijas, entre los que no
+  volvieron firmados: una copia del recibo sin firmar con las iniciales, en la
+  carpeta de los firmados. En la lista quedan como «con iniciales», no como
+  firmados.
+- `FALTAN RECIBOS FIRMADOS MM AAAA.txt`, con los que faltan y los archivos en los
+  que no encontró a nadie.
+- La carpeta «RECIBOS FIRMADOS <MES>», solo si hay algo para guardar adentro.
+
+Todo va a la carpeta de los firmados, que es lo que manda el cliente. Los recibos
+sin firmar, los que arma el estudio para mandarle, no se tocan ni se separan: la
+app solo los lee. Nunca reemplaza ni borra un archivo: si ya existe uno con ese
+nombre, lo deja como está.
+
 ## Descargar
 
 Las dos versiones están en la página de releases. Si no sabes cuál usar, prueba
@@ -84,6 +132,11 @@ Con .NET 10 en Windows: `app/build-windows.bat`. Las pruebas: `dotnet test tests
   [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries): dibuja las
   hojas que lee el OCR. Sus licencias (BSD, FreeType, libjpeg, ICU y las demás)
   están en `app/PDFium-licencias.txt`.
+- [RapidOcrNet](https://github.com/BobLd/RapidOcrNet), licencia Apache 2.0, con
+  los modelos PP-OCRv6 de [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR),
+  licencia Apache 2.0: el OCR de las fotos y los escaneos. Corre sobre
+  [ONNX Runtime](https://github.com/microsoft/onnxruntime) y
+  [SkiaSharp](https://github.com/mono/SkiaSharp), las dos con licencia MIT.
 - La fuente Caveat, licencia SIL Open Font License (el texto está en
   `app/Caveat-OFL.txt`). Se usa solo si la PC no tiene Segoe Print, que viene
   con Windows y la app toma de la PC sin incluirla.

@@ -23,14 +23,71 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Los botones de un ícono (las flechas del mes, revisar de nuevo): al pasar por encima se ilumina el
+             fondo y al apretar se oscurece, como los botones sutiles de Windows 11. -->
+        <Style x:Key="Icono" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="fondo" CornerRadius="8" Margin="4" Background="Transparent">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="fondo" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="fondo" Property="Background" Value="{DynamicResource SubtleFillColorTertiaryBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
         <StackPanel Margin="20,10,20,20">
-            <!-- Arriba a la derecha: la flecha circular busca una versión nueva; cuando la descargó, el mismo
-                 botón se estira hasta decir «Reiniciar para actualizar». -->
-            <Button x:Name="actualizar" Style="{StaticResource Llano}" HorizontalAlignment="Right"
-                    AutomationProperties.Name="Buscar actualización">
+            <Grid>
+            <!-- Arriba a la izquierda, las dos tareas: la pastilla viaja de una a la otra y la vista nueva entra
+                 por su lado. «Clientes» y no «Revisar clientes»: con la flecha estirada en «Reiniciar para
+                 actualizar», el nombre largo no entra en la fila. -->
+            <Border HorizontalAlignment="Left" VerticalAlignment="Center" CornerRadius="16" Padding="2"
+                    Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                <Grid x:Name="selector">
+                    <Border x:Name="pastilla" HorizontalAlignment="Left" CornerRadius="14" BorderThickness="1"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}"
+                            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                        <Border.RenderTransform>
+                            <TranslateTransform x:Name="pastillaCorrida"/>
+                        </Border.RenderTransform>
+                    </Border>
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="verSeparar" Style="{StaticResource Llano}" AutomationProperties.Name="Separar recibos">
+                            <TextBlock x:Name="verSepararTexto" Text="Separar" Margin="14,5,14,6" FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                        </Button>
+                        <Button x:Name="verClientes" Style="{StaticResource Llano}" AutomationProperties.Name="Revisar los clientes">
+                            <TextBlock x:Name="verClientesTexto" Text="Clientes" Margin="14,5,14,6" FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Arriba a la derecha, solo cuando hay una versión nueva (ver BuscarActualizacion): entra con el anillo
+                 de la descarga y, bajada, se estira hasta decir «Reiniciar para actualizar». Hidden y no Collapsed:
+                 guarda su lugar en la barra. -->
+            <Button x:Name="actualizar" Style="{StaticResource Llano}" HorizontalAlignment="Right" Visibility="Hidden"
+                    AutomationProperties.Name="Bajando una versión nueva">
+                <Button.RenderTransform>
+                    <TranslateTransform x:Name="actualizarCorrida"/>
+                </Button.RenderTransform>
                 <Grid x:Name="actualizarCaja" Width="32" Height="32">
                     <Border CornerRadius="16" Background="{DynamicResource SubtleFillColorSecondaryBrush}"/>
                     <Border x:Name="actualizarAcento" CornerRadius="16" Opacity="0"
@@ -45,19 +102,21 @@
                     <TextBlock x:Name="actualizarTexto" Text="Reiniciar para actualizar" Opacity="0" Margin="14,0,34,0"
                                VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold"
                                Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
-                    <Grid Width="32" HorizontalAlignment="Right" RenderTransformOrigin="0.5,0.5">
-                        <Grid.RenderTransform>
-                            <TransformGroup>
-                                <ScaleTransform x:Name="flechaEscala"/>
-                                <RotateTransform x:Name="giro"/>
-                            </TransformGroup>
-                        </Grid.RenderTransform>
+                    <Grid Width="32" HorizontalAlignment="Right">
                         <TextBlock x:Name="flecha" Text="&#xE72C;" FontFamily="{StaticResource Iconos}" FontSize="14"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                     </Grid>
                 </Grid>
             </Button>
+            </Grid>
+
+            <!-- Las dos vistas en el mismo lugar: al cambiar, la nueva empuja a la anterior. -->
+            <Grid x:Name="vistas">
+            <StackPanel x:Name="vistaSeparar" Width="360" HorizontalAlignment="Left">
+                <StackPanel.RenderTransform>
+                    <TranslateTransform x:Name="separarCorrida"/>
+                </StackPanel.RenderTransform>
 
             <!-- La tarjeta: donde se sueltan los PDF, o se hace clic para buscarlos. -->
             <Button x:Name="tarjeta" Style="{StaticResource Llano}" Margin="0,8,0,0" RenderTransformOrigin="0.5,0.5"
@@ -97,7 +156,7 @@
                                    FontFamily="{StaticResource Titulos}" FontSize="19" FontWeight="SemiBold"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                    Text="Soltá acá los recibos o la nómina"/>
-                        <TextBlock Margin="6,4,6,0" TextAlignment="Center" TextWrapping="Wrap" FontSize="13"
+                        <TextBlock x:Name="tarjetaDetalle" Margin="6,4,6,0" TextAlignment="Center" TextWrapping="Wrap" FontSize="13"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                                    Text="Un PDF por empleado y mes, con sus iniciales en la firma. O hacé clic para buscarlos."/>
                         <TextBlock x:Name="estado" Margin="0,10,0,0" TextAlignment="Center" FontSize="12"
@@ -106,6 +165,9 @@
                     </StackPanel>
                 </Grid>
             </Button>
+
+            <!-- Las iniciales son un parche para los recibos que vuelven sin firmar: a pedido, y se acuerda. -->
+            <CheckBox x:Name="estampar" Margin="4,10,0,0" FontSize="13" Content="Estampar las iniciales en la firma"/>
 
             <!-- Una ficha por carpeta de empleador: ahí van a parar los recibos que salen de la tarjeta. -->
             <WrapPanel x:Name="fichas" Margin="0,4,0,0"/>
@@ -142,6 +204,219 @@
                         </StackPanel>
                     </Grid>
                 </StackPanel>
+            </Grid>
+            </StackPanel>
+
+            <!-- Todos los clientes de un mes: un renglón por cliente que se resuelve a medida que se lee. El alto
+                 es fijo (lo pone el código según la pantalla) y la lista ocupa lo que sobra. -->
+            <Grid x:Name="vistaClientes" Visibility="Collapsed" HorizontalAlignment="Left">
+                <Grid.RenderTransform>
+                    <TranslateTransform x:Name="clientesCorrida"/>
+                </Grid.RenderTransform>
+                <!-- A la izquierda la lista, con el ancho de siempre; a la derecha, el panel que se abre para mostrar un
+                     cliente o lo que se va a guardar. No es un teléfono: lo que es lista va al costado, no debajo. -->
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="360"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- El mes: las flechas lo corren y el nombre viaja hacia el lado del clic. -->
+                <Grid Height="46" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="44"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.ColumnSpan="4" CornerRadius="12" BorderThickness="1"
+                            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"/>
+                    <Button x:Name="mesAntes" Style="{StaticResource Icono}" AutomationProperties.Name="Mes anterior">
+                        <TextBlock Text="&#xE76B;" FontFamily="{StaticResource Iconos}" FontSize="12"/>
+                    </Button>
+                    <Grid x:Name="mesMarco" Grid.Column="1" ClipToBounds="True"/>
+                    <Button x:Name="mesDespues" Grid.Column="2" Style="{StaticResource Icono}" AutomationProperties.Name="Mes siguiente">
+                        <TextBlock Text="&#xE76C;" FontFamily="{StaticResource Iconos}" FontSize="12"/>
+                    </Button>
+                    <Button x:Name="reRevisar" Grid.Column="3" Style="{StaticResource Icono}" AutomationProperties.Name="Revisar de nuevo"
+                            ToolTip="Revisar de nuevo" RenderTransformOrigin="0.5,0.5">
+                        <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Iconos}" FontSize="13" RenderTransformOrigin="0.5,0.5">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform x:Name="reRevisarGiro"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Button>
+                </Grid>
+
+                <TextBlock x:Name="clientesEstado" Grid.Row="1" Margin="4,10,4,0" FontSize="12" TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+
+                <Grid Grid.Row="2" Margin="0,6,0,0">
+                    <ScrollViewer x:Name="clientesDesplazar" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Canvas x:Name="clientesFilas" Height="0"/>
+                    </ScrollViewer>
+                    <!-- Los bordes toman sombra recién cuando hay renglones que pasan por debajo: arriba si se bajó la
+                         lista, abajo si sigue más allá del letrero. -->
+                    <Border x:Name="sombraArriba" Height="14" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#30000000" Offset="0"/>
+                                <GradientStop Color="#00000000" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                    <Border x:Name="sombraAbajo" Height="14" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush StartPoint="0,1" EndPoint="0,0">
+                                <GradientStop Color="#30000000" Offset="0"/>
+                                <GradientStop Color="#00000000" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                    <!-- Con la lista vacía, la carpeta del ícono: mientras busca la primera vez se forma, hojea y queda
+                         quieta. Sin carpeta elegida, debajo va cómo elegirla. -->
+                    <StackPanel VerticalAlignment="Center" Margin="16,0">
+                        <Image x:Name="clientesIcono" Source="app.png" Width="84" Height="84" Opacity="0" IsHitTestVisible="False"
+                               RenderTransformOrigin="0.5,0.7" RenderOptions.BitmapScalingMode="HighQuality">
+                            <Image.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="clientesIconoEscala"/>
+                                    <RotateTransform x:Name="clientesIconoGiro"/>
+                                </TransformGroup>
+                            </Image.RenderTransform>
+                        </Image>
+                        <!-- La carpeta de los clientes se elige una vez en cada PC y queda guardada en ella: la ruta del estudio no va en el código, que es público. -->
+                        <StackPanel x:Name="sinRaiz" Visibility="Collapsed" Margin="0,12,0,0">
+                            <TextBlock x:Name="sinRaizTexto" TextWrapping="Wrap" TextAlignment="Center" FontSize="13"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                            <Button x:Name="elegirRaiz" Content="Elegir la carpeta…" HorizontalAlignment="Center" Margin="0,14,0,0"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Como el letrero de la nómina: rojo si falta algún recibo, amarillo si solo faltan firmas, verde
+                     cuando están todos. -->
+                <Grid x:Name="clientesCartel" Grid.Row="3" Height="46" Margin="0,12,0,0" Opacity="0">
+                    <Grid.RenderTransform>
+                        <TranslateTransform x:Name="clientesCartelAltura"/>
+                    </Grid.RenderTransform>
+                    <Border CornerRadius="10" Background="#C42B1C"/>
+                    <!-- Amarillo si solo faltan firmas: el de la carpeta del ícono, con la letra oscura. -->
+                    <Border x:Name="clientesCartelAmarillo" CornerRadius="10" Background="#EBB41C" Opacity="0"/>
+                    <Border x:Name="clientesCartelVerde" CornerRadius="10" Background="#107C10" Opacity="0"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock x:Name="clientesCartelIcono" FontFamily="{StaticResource Iconos}" FontSize="16"
+                                   Margin="0,1,10,0" VerticalAlignment="Center" Foreground="White" RenderTransformOrigin="0.5,0.5">
+                            <TextBlock.RenderTransform>
+                                <ScaleTransform x:Name="clientesCartelIconoEscala"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                        <TextBlock x:Name="clientesCartelTexto" FontFamily="{StaticResource Titulos}" FontSize="16"
+                                   FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"
+                                   AutomationProperties.LiveSetting="Polite"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Guardar: abre en el panel de la derecha la lista exacta de lo que se va a guardar, con su
+                     confirmación. Nada se escribe sin ese segundo clic. -->
+                <Grid x:Name="guardarCaja" Grid.Row="4" Margin="0,10,0,0">
+                    <Border CornerRadius="10" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+                    <Button x:Name="guardar" Style="{StaticResource Llano}" Height="42" IsEnabled="False"
+                            AutomationProperties.Name="Guardar en la carpeta de los clientes">
+                        <Grid Background="Transparent">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="&#xE74E;" FontFamily="{StaticResource Iconos}" FontSize="14" Margin="0,1,10,0"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                                <TextBlock x:Name="guardarTexto" Text="Guardar…" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+                </Grid>
+                </Grid>
+
+                <!-- El panel de la derecha. Crece desde el borde de la lista, con la ventana agrandándose para él, y se
+                     guarda por el mismo lado al cerrarlo. -->
+                <Grid x:Name="panel" Grid.Column="1" Width="0" Margin="0,8,0,0" ClipToBounds="True" HorizontalAlignment="Left">
+                    <Grid x:Name="panelCaja" Width="440" HorizontalAlignment="Left">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="panelCorrida"/>
+                        </Grid.RenderTransform>
+                        <Border Margin="16,0,0,0" CornerRadius="12" BorderThickness="1"
+                                Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"/>
+                        <Grid Margin="16,0,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Margin="16,12,8,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="panelIcono" FontFamily="{StaticResource Iconos}" FontSize="16" Margin="0,3,10,0"
+                                           VerticalAlignment="Top" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="panelIconoEscala"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock x:Name="panelTitulo" FontFamily="{StaticResource Titulos}" FontSize="17" FontWeight="SemiBold"
+                                               TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                               AutomationProperties.LiveSetting="Polite"/>
+                                    <TextBlock x:Name="panelSubtitulo" FontSize="12" TextWrapping="Wrap" Margin="0,3,0,0"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                </StackPanel>
+                                <!-- La cruz gira al pasar por encima: dice «cerrar» antes del clic. -->
+                                <Button x:Name="panelCerrar" Grid.Column="2" Style="{StaticResource Icono}" Width="36" Height="36"
+                                        VerticalAlignment="Top" AutomationProperties.Name="Cerrar el panel" ToolTip="Cerrar (Esc)">
+                                    <TextBlock Text="&#xE711;" FontFamily="{StaticResource Iconos}" FontSize="11" RenderTransformOrigin="0.5,0.5">
+                                        <TextBlock.RenderTransform>
+                                            <RotateTransform x:Name="panelCerrarGiro"/>
+                                        </TextBlock.RenderTransform>
+                                    </TextBlock>
+                                </Button>
+                            </Grid>
+                            <ScrollViewer x:Name="panelDesplazar" Grid.Row="1" Padding="16,0,12,8"
+                                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel x:Name="panelLista">
+                                    <StackPanel.RenderTransform>
+                                        <TranslateTransform x:Name="panelListaCorrida"/>
+                                    </StackPanel.RenderTransform>
+                                </StackPanel>
+                            </ScrollViewer>
+                            <StackPanel Grid.Row="2" Margin="16,6,16,14">
+                                <StackPanel x:Name="pieGuardar" Visibility="Collapsed">
+                                    <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                               Text="No se borra ni se reemplaza ningún archivo: lo que ya existe queda como está."/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                                        <Button x:Name="guardarNo" Content="Cancelar" MinWidth="96" Margin="0,0,8,0"/>
+                                        <Button x:Name="guardarSi" Content="Guardar" MinWidth="96" Style="{DynamicResource AccentButtonStyle}"/>
+                                    </StackPanel>
+                                </StackPanel>
+                                <!-- El pie de un cliente: su carpeta y guardar solo lo de él (la lista está arriba, en «Para guardar»). -->
+                                <Grid x:Name="pieCliente" Visibility="Collapsed">
+                                    <Button x:Name="abrirCarpeta" Content="Abrir la carpeta" HorizontalAlignment="Left"/>
+                                    <Button x:Name="guardarCliente" HorizontalAlignment="Right" MinWidth="96" Visibility="Collapsed"
+                                            Style="{DynamicResource AccentButtonStyle}"/>
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </Grid>
             </Grid>
         </StackPanel>
 

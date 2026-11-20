@@ -9,13 +9,19 @@
   <ItemGroup>
     <!-- El motor no usa WinForms: se compila acá directo. -->
     <Compile Include="..\app\Recibos.cs" />
+    <Compile Include="..\app\Clientes.cs" />
+    <Compile Include="..\app\Retoque.cs" />
     <Compile Include="..\app\Actualizador.cs" />
     <Compile Include="..\app\WindowsOcr.cs" />
+    <Compile Include="..\app\Lector.cs" />
     <EmbeddedResource Include="..\app\Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
+    <EmbeddedResource Include="$(PkgRapidOcrNet)\models\v5\ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" LogicalName="modelos/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\app\modelos\*.*" LogicalName="modelos/%(Filename)%(Extension)" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="PdfPig" Version="0.1.16" />
     <PackageReference Include="bblanchon.PDFium.Win32" Version="158.0.8111" />
+    <PackageReference Include="RapidOcrNet" Version="4.2.0" GeneratePathProperty="true" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">

@@ -22,6 +22,7 @@ public partial class Ventana : Window
     readonly Ocr? ocr = CrearOcr();
     bool working, buscando, anticipando, cartelVisible;
     string? nuevoExe; // descargado y verificado: reemplaza al actual al reiniciar
+    DateTime ultimaBusqueda; // «Revisar de nuevo» busca versión nueva una vez por hora como mucho
     Nomina? nomina; // la última leída: si después llegan recibos de ese mes, se vuelve a revisar
     Nomina? mostrada; // la que está en pantalla: si se vuelve a revisar, sus renglones cambian en el lugar
     readonly Dictionary<string, Ficha> porCarpeta = new(StringComparer.OrdinalIgnoreCase);
@@ -56,12 +57,10 @@ public partial class Ventana : Window
     {
         startupFiles = files;
         InitializeComponent();
+        IniciarClientes();
 
-        actualizar.Click += async (_, _) =>
-        {
-            if (nuevoExe is null) await BuscarActualizacion(manual: true);
-            else Reiniciar();
-        };
+        // Se ve solo cuando hay una versión nueva; mientras se baja, tocarlo no hace nada.
+        actualizar.Click += (_, _) => { if (nuevoExe is not null) Reiniciar(); };
         tarjeta.Click += async (_, _) => await Pick();
         // Lo que va a pasar se insinúa: la tarjeta cede bajo el puntero antes de abrir el diálogo.
         tarjeta.PreviewMouseLeftButtonDown += (_, _) => Escalar(0.985);
@@ -78,15 +77,14 @@ public partial class Ventana : Window
         Drop += (_, e) =>
         {
             Anticipar(false);
-            if (working || e.Data.GetData(DataFormats.FileDrop) is not string[] dropped) return;
+            if (working || enClientes || e.Data.GetData(DataFormats.FileDrop) is not string[] dropped) return;
             Tragar();
             _ = ProcessAll(dropped);
         };
         ContentRendered += async (_, _) =>
         {
             AddToSendTo();
-            actualizar.ToolTip = $"Versión {Actualizador.Actual} · buscar actualización";
-            _ = BuscarActualizacion(manual: false);
+            _ = BuscarActualizacion();
             // La versión anterior se cierra apenas abre esta: un rato después ya se puede borrar.
             Luego(3000, Actualizador.BorrarViejo);
             if (startupFiles.Length > 0) await ProcessAll(startupFiles);
@@ -131,6 +129,7 @@ public partial class Ventana : Window
         Estado(files.Length == 1 ? $"Leyendo {Path.GetFileName(files[0])}…" : $"Leyendo {files.Length} PDF…");
         var problems = new List<string>();
         var r = new Resultado([], []);
+        var iniciales = estampar.IsChecked == true; // se lee acá: la casilla no se puede tocar desde otro hilo
         try
         {
             // El OCR de Windows es asíncrono, pero el armado de los PDF no: afuera del hilo de la ventana.
@@ -140,7 +139,7 @@ public partial class Ventana : Window
                 if (msg.StartsWith('⚠')) problems.Add(msg[2..]);
                 else if (msg.StartsWith('✓')) Separado(msg[2..]);
                 else Estado(msg);
-            })));
+            }), iniciales: iniciales));
             RecordarCarpetas(r.Creados);
             foreach (var f in r.Creados) FichaDe(f).Archivo ??= f;
             if (r.Nominas.Count > 0) nomina = r.Nominas[^1];
@@ -207,7 +206,8 @@ public partial class Ventana : Window
 
     void Arrastre(DragEventArgs e)
     {
-        var sirve = !working && e.Data.GetDataPresent(DataFormats.FileDrop);
+        // En la vista de clientes no hay tarjeta donde soltar.
+        var sirve = !working && !enClientes && e.Data.GetDataPresent(DataFormats.FileDrop);
         e.Effects = sirve ? DragDropEffects.Copy : DragDropEffects.None;
         e.Handled = true;
         if (sirve) Anticipar(true);
@@ -518,6 +518,13 @@ public partial class Ventana : Window
     // La sección crece y se achica con resorte.
     void Crecer(bool mostrar)
     {
+        // Con la vista de clientes adelante, la sección se acomoda sin mover la ventana, que ahora es de la otra
+        // vista: al volver, CambiarVista mide la de separar entera.
+        if (enClientes)
+        {
+            seccion.Height = mostrar ? double.NaN : 0;
+            return;
+        }
         // ponytail-keep: lo que se agregó recién (la ficha de la carpeta, que aparece justo antes de la
         // revisión) tiene que estar acomodado antes de medir. Si no, ActualHeight no la cuenta, la ventana se
         // ubica 40 px más abajo de lo que debe y el letrero queda detrás de la barra de tareas.
@@ -554,27 +561,19 @@ public partial class Ventana : Window
         Crecer(false);
     }
 
-    // ---- La flecha de actualizar ----
+    // ---- El botón de actualizar ----
 
-    async Task BuscarActualizacion(bool manual)
+    // Se busca callado: al abrir y después de «Revisar de nuevo». El botón de arriba aparece recién si hay una versión
+    // nueva: entra con el anillo de la descarga y, bajada y verificada, se estira hasta decir «Reiniciar para actualizar».
+    async Task BuscarActualizacion()
     {
-        if (buscando) return;
+        if (buscando || nuevoExe is not null) return;
         buscando = true;
-        Girar(true);
+        ultimaBusqueda = DateTime.Now;
         try
         {
-            var nueva = await Actualizador.Buscar();
-            if (nueva is null)
-            {
-                if (manual)
-                {
-                    Girar(false);
-                    Tildar();
-                    Burbuja($"Ya tenés la última versión ({Actualizador.Actual})");
-                }
-                return;
-            }
-            Girar(false);
+            if (await Actualizador.Buscar() is not { } nueva) return;
+            MostrarActualizar();
             var ultimo = -1;
             nuevoExe = await Actualizador.Descargar(nueva, new Progress<int>(p =>
             {
@@ -585,37 +584,33 @@ public partial class Ventana : Window
             Estirar();
             actualizar.ToolTip = $"La versión {nueva.Version} ya está descargada";
         }
-        catch (UnauthorizedAccessException) when (manual)
-        {
-            // La carpeta del programa no deja escribir (Archivos de programa, por ejemplo): a mano.
-            Process.Start(new ProcessStartInfo(Actualizador.Pagina) { UseShellExecute = true });
-            Burbuja("Bajá la versión nueva de la página que se abrió");
-        }
-        catch (Exception) when (manual)
-        {
-            Burbuja("No pude buscar actualizaciones");
-        }
-        catch { } // la búsqueda al abrir es silenciosa: sin internet, no molesta
+        // shortcut: sin internet, o si la carpeta del programa no deja escribir (Archivos de programa), no avisa nada y la
+        // versión nueva no se baja. Si algún día la instalan ahí, que el botón aparezca y abra la página de descarga.
+        catch { }
         finally
         {
             buscando = false;
-            Girar(false);
-            if (nuevoExe is null) Opacidad(anillo, 0);
+            if (nuevoExe is null) EsconderActualizar();
         }
     }
 
-    // Mientras busca, la flecha gira: lo único lineal, porque gira sin parar. Al terminar no frena en seco:
-    // completa la vuelta con resorte.
-    void Girar(bool si)
+    // Lo que no viene de ningún lado entra con lo que lo trae: baja un poco mientras aparece.
+    void MostrarActualizar()
     {
-        if (si && !Resorte.Quieto)
+        actualizar.Visibility = Visibility.Visible;
+        Aparecer(actualizar, actualizarCorrida, -8);
+    }
+
+    // Si la descarga no llega, se va por donde vino.
+    void EsconderActualizar()
+    {
+        if (actualizar.Visibility != Visibility.Visible) return;
+        Resorte.Animar((actualizar, "y"), -8, v => actualizarCorrida.Y = v, rigidez: 260);
+        Opacidad(actualizar, 0, alTerminar: () =>
         {
-            giro.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(0, 360, TimeSpan.FromSeconds(0.9)) { RepeatBehavior = RepeatBehavior.Forever });
-            return;
-        }
-        var angulo = giro.Angle;
-        giro.BeginAnimation(RotateTransform.AngleProperty, null);
-        Resorte.Animar((giro, "angulo"), Math.Ceiling(angulo / 360) * 360, v => giro.Angle = v, desde: angulo, rigidez: 120);
+            actualizar.Visibility = Visibility.Hidden;
+            anillo.Opacity = 0;
+        });
     }
 
     // La descarga llena un anillo alrededor de la flecha.
@@ -637,18 +632,6 @@ public partial class Ventana : Window
         Opacidad(actualizarTexto, 1);
         Opacidad(anillo, 0);
         flecha.SetResourceReference(TextBlock.ForegroundProperty, "TextOnAccentFillColorPrimaryBrush");
-    }
-
-    // «Ya tenés la última»: la flecha se vuelve tilde un momento y vuelve a ser flecha.
-    void Tildar()
-    {
-        void Cambiar(string glifo)
-        {
-            flecha.Text = glifo;
-            Resorte.Animar((flecha, "escala"), 1, v => flechaEscala.ScaleX = flechaEscala.ScaleY = v, desde: 0.4, rigidez: 420, rebote: 0.4);
-        }
-        Cambiar(Tilde);
-        Luego(1800, () => Cambiar(Flecha));
     }
 
     // Los avisos de la flecha salen de la flecha misma y vuelven a ella.

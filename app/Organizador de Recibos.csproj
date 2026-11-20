@@ -25,9 +25,21 @@
     <PackageReference Include="PdfPig" Version="0.1.16" />
     <!-- Solo el pdfium.dll nativo (x64 y ARM64): dibuja las hojas para el OCR, ver WindowsOcr.cs. -->
     <PackageReference Include="bblanchon.PDFium.Win32" Version="158.0.8111" />
+    <!-- El OCR de los firmados (fotos y escaneos): RapidOcrNet sobre ONNX Runtime, con los modelos PP-OCRv6 small de
+         modelos\ (ver Lector.cs). -->
+    <PackageReference Include="RapidOcrNet" Version="4.2.0" GeneratePathProperty="true" />
     <!-- Instancia fija (wght 400) de Caveat[wght].ttf de google/fonts, hecha con fontTools.varLib.instancer:
          la variable trae todos los grosores y pesa más. -->
     <EmbeddedResource Include="Caveat-Regular.ttf" LogicalName="Caveat-Regular.ttf" />
+    <!-- ponytail-keep: los modelos van adentro del .exe. El paquete los copia a una carpeta models\v5 al lado del
+         binario, y el release es un .exe solo: sin esto, la app publicada no encontraba los modelos. Se sacan a la
+         carpeta de la app la primera vez (ver Lector.cs). -->
+    <!-- Del paquete, solo el clasificador: PP-OCRv6 usa el de v5. -->
+    <EmbeddedResource Include="$(PkgRapidOcrNet)\models\v5\ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" LogicalName="modelos/%(Filename)%(Extension)" />
+    <!-- PP-OCRv6 small, de modelscope.cn/models/RapidAI/RapidOCR (versión v3.10.0, carpetas onnx/PP-OCRv6 y
+         paddle/PP-OCRv6/rec/PP-OCRv6_rec_small). Los SHA256 de los .onnx están en python/rapidocr/default_models.yaml
+         de github.com/RapidAI/RapidOCR. -->
+    <EmbeddedResource Include="modelos\*.*" LogicalName="modelos/%(Filename)%(Extension)" />
     <!-- El ícono grande de la tarjeta. -->
     <Resource Include="app.png" />
   </ItemGroup>

@@ -109,9 +109,10 @@ public static class Recibos
         return (dv == 11 ? 0 : dv == 10 ? 9 : dv) == d[10];
     }
 
-    // Solo la nómina de AFIP lleva «Contribuyente» en el encabezado; ningún formato de recibo lo tiene.
+    // La página «Ver Nómina» lleva «Contribuyente» en el encabezado, y la consulta de nómina que baja de AFIP dice
+    // «NÓMINA», con acento. Ningún formato de recibo dice ninguna de las dos.
     static bool EsNomina(IReadOnlyList<Palabra> ws) =>
-        ws.Any(w => Igual(w.Texto, "Contribuyente") || w.Texto.Contains("Nomina", StringComparison.OrdinalIgnoreCase));
+        ws.Any(w => Igual(w.Texto, "Contribuyente") || Clientes.Normal(w.Texto).Contains("NOMINA"));
 
     /// <summary>Período y empleados de una hoja de la nómina: una columna por empleado, con su CUIL y su nombre.</summary>
     public static (int Mes, string Anio, List<Empleado> Empleados) LeerNomina(IReadOnlyList<Palabra> ws, Action<string> avisar)
@@ -121,21 +122,26 @@ public static class Recibos
         // La fila de los empleados; el CUIT del empleador está en el encabezado y así queda afuera.
         var rotulo = ws.Where(w => w.Texto.StartsWith("CUIL", StringComparison.OrdinalIgnoreCase)).OrderBy(w => w.Izq).FirstOrDefault()
                      ?? throw new FormatException("no encontré la fila CUIL de la nómina");
-        var columnas = new List<(double X, string Cuil)>();
+        var columnas = new List<(double X, double Centro, string Cuil)>();
         foreach (var w in ws.Where(w => Math.Abs(w.CentroY - rotulo.CentroY) < 4 && w.Izq >= rotulo.Izq - 1))
         {
-            var leidos = CuilRegex.Matches(w.Texto).Where(c => CuilValido(c.Value)).ToList();
+            var leidos = CuilRegex.Matches(w.Texto).Where(c => CuilValido(c.Value)).Select(c => (c.Index, c.Length, Cuil: Cuils(c.Value).First())).ToList();
+            // La consulta de AFIP escribe los CUIL sin guiones: once dígitos. Solo acá, en la fila del CUIL; en el
+            // resto del texto, once dígitos sueltos pueden ser cualquier otra cosa.
+            if (leidos.Count == 0 && Regex.IsMatch(w.Texto, @"^\d{11}$") && CuilValido(w.Texto))
+                leidos.Add((0, 11, $"{w.Texto[..2]}-{w.Texto[2..10]}-{w.Texto[10]}"));
             // El OCR a veces pega el rótulo al número («CUIL20-...»): la columna empieza donde empieza el número.
-            columnas.AddRange(leidos.Select(c => (w.Izq + (w.Der - w.Izq) * c.Index / w.Texto.Length, Cuils(c.Value).First())));
+            double Punto(int i) => w.Izq + (w.Der - w.Izq) * i / w.Texto.Length;
+            columnas.AddRange(leidos.Select(c => (Punto(c.Index), (Punto(c.Index) + Punto(c.Index + c.Length)) / 2, c.Cuil)));
             if (leidos.Count == 0 && w.Texto.Count(char.IsDigit) >= 9) avisar($"no pude leer bien el CUIL «{w.Texto}» de la nómina");
         }
         columnas.Sort();
 
-        // Los nombres van debajo, hasta la fila «Obra Social», alineados a la izquierda de cada columna.
+        // Los nombres van debajo, hasta la fila «Obra Social».
         var piso = ws.Where(w => w.Texto.StartsWith("Obra", StringComparison.OrdinalIgnoreCase) && w.CentroY < rotulo.CentroY)
                      .Select(w => w.Arriba).DefaultIfEmpty(rotulo.Abajo - 40).Max();
         // Ancho de columna: la última hoja termina con «Suma Totales», que no es de ningún empleado.
-        var paso = columnas.Count > 1 ? (columnas[^1].X - columnas[0].X) / (columnas.Count - 1) : 150;
+        var paso = columnas.Count > 1 ? (columnas[^1].Centro - columnas[0].Centro) / (columnas.Count - 1) : 150;
         var nombres = columnas.Select(_ => new List<Palabra>()).ToList();
         foreach (var w in ws.Where(w => w.CentroY < rotulo.Abajo && w.CentroY > piso))
         {
@@ -144,8 +150,14 @@ public static class Recibos
             // («NombrePEREZ»): se le saca el rótulo.
             if (columnas.Count > 0 && w.Izq < columnas[0].X - 3 && w.Der > columnas[0].X && w.Texto.StartsWith("Nombre", StringComparison.OrdinalIgnoreCase))
                 texto = w with { Texto = w.Texto[6..], Izq = columnas[0].X };
-            var i = columnas.FindLastIndex(c => c.X <= texto.Izq + 3);
-            if (i >= 0 && texto.Izq < columnas[i].X + paso - 3 && texto.Texto.Length > 0) nombres[i].Add(texto);
+            if (texto.Texto.Length == 0 || columnas.Count == 0) continue;
+            // ponytail-keep: por el centro y no por el borde izquierdo. La página «Ver Nómina» alinea el nombre a la
+            // izquierda del CUIL, pero la consulta de AFIP lo centra: un nombre más ancho que el CUIL empieza antes
+            // que su columna, y por el borde caía en la del vecino. Más lejos que media columna es otra cosa
+            // («Suma Totales», el rótulo de la fila).
+            var centro = (texto.Izq + texto.Der) / 2;
+            var i = Enumerable.Range(0, columnas.Count).MinBy(k => Math.Abs(columnas[k].Centro - centro));
+            if (Math.Abs(columnas[i].Centro - centro) < paso / 2) nombres[i].Add(texto);
         }
         var empleados = columnas.Select((c, i) => new Empleado(c.Cuil, EnRenglones(nombres[i]))).ToList();
         return (int.Parse(m.Groups[1].Value), m.Groups[2].Value, empleados);
@@ -204,11 +216,46 @@ public static class Recibos
     // Los caracteres que Windows no acepta en un nombre de archivo.
     static string Limpiar(string s) => string.Concat(s.Where(c => !"\\/:*?\"<>|".Contains(c) && !char.IsControl(c)));
 
-    static IReadOnlyList<Palabra> Palabras(UglyToad.PdfPig.Content.Page p) =>
+    internal static IReadOnlyList<Palabra> Palabras(UglyToad.PdfPig.Content.Page p) =>
         p.GetWords().Select(w => new Palabra(w.Text, w.BoundingBox.Left, w.BoundingBox.Bottom, w.BoundingBox.Right, w.BoundingBox.Top)).ToList();
 
-    /// <summary>Separa los recibos y lee las nóminas. Sin carpetaSalida, cada recibo va junto a su PDF de origen.</summary>
-    public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null)
+    // Los recibos que genera el sistema traen texto; solo los escaneados pasan por OCR.
+    static async Task<IReadOnlyList<Palabra>> PalabrasDe(UglyToad.PdfPig.Content.Page page, string ruta, Ocr? ocr, Action<string> avisar)
+    {
+        if (page.Letters.Count > 0) return Palabras(page);
+        if (ocr is null) throw new FormatException("es una imagen y no hay OCR");
+        avisar($"leyendo {Path.GetFileName(ruta)}, hoja {page.Number} con OCR…");
+        return await ocr(ruta, page.Number);
+    }
+
+    /// <summary>Solo la nómina de un PDF, sin separar ni escribir nada: la revisión de clientes no escribe nada
+    /// hasta que le dicen. null si ninguna hoja es de una nómina.</summary>
+    public static async Task<Nomina?> LeerNominaPdf(string ruta, Ocr? ocr, Action<string> avisar)
+    {
+        using var doc = PdfDocument.Open(ruta);
+        Nomina? nomina = null;
+        foreach (var page in doc.GetPages())
+        {
+            var donde = $"{Path.GetFileName(ruta)}, hoja {page.Number}";
+            try
+            {
+                var ws = await PalabrasDe(page, ruta, ocr, avisar);
+                if (!EsNomina(ws)) continue;
+                var (mes, anio, empleados) = LeerNomina(ws, msg => avisar($"⚠ {donde}: {msg}"));
+                var n = nomina ??= new Nomina(ruta, mes, anio, []);
+                n.Empleados.AddRange(empleados.Where(e => n.Empleados.All(x => x.Cuil != e.Cuil)));
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                avisar($"⚠ {donde}: {e.Message}");
+            }
+        }
+        return nomina;
+    }
+
+    /// <summary>Separa los recibos y lee las nóminas. Sin carpetaSalida, cada recibo va junto a su PDF de origen.
+    /// Las iniciales en la firma son a pedido: son un parche para los recibos que vuelven sin firmar.</summary>
+    public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null, bool iniciales = true)
     {
         var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio), (List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils)>();
         var docs = new List<PdfDocument>();
@@ -226,16 +273,7 @@ public static class Recibos
                     var donde = $"{Path.GetFileName(ruta)}, hoja {page.Number}";
                     try
                     {
-                        // Los recibos que genera el sistema traen texto; solo los escaneados pasan por OCR.
-                        IReadOnlyList<Palabra> ws;
-                        if (page.Letters.Count > 0) ws = Palabras(page);
-                        else if (ocr is not null)
-                        {
-                            avisar($"leyendo {donde} con OCR…");
-                            ws = await ocr(ruta, page.Number);
-                        }
-                        else throw new FormatException("es una imagen y no hay OCR");
-
+                        var ws = await PalabrasDe(page, ruta, ocr, avisar);
                         if (EsNomina(ws))
                         {
                             var (mes, anio, empleados) = LeerNomina(ws, msg => avisar($"⚠ {donde}: {msg}"));
@@ -262,12 +300,14 @@ public static class Recibos
             {
                 var builder = new PdfDocumentBuilder();
                 // El CUIL y el período van también en las palabras clave: un recibo escaneado no tiene texto,
-                // y la revisión de la nómina los busca ahí.
-                builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}";
-                var fuente = builder.AddTrueTypeFont(Manuscrita.Value);
+                // y la revisión de la nómina los busca ahí. «iniciales» marca los que llevan las del estudio:
+                // la revisión de clientes no los cuenta como firmados por el empleado.
+                builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "");
+                var fuente = iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null;
                 foreach (var (doc, n, firma) in hojas)
                 {
                     var p = builder.AddPage(doc, n);
+                    if (fuente is null) continue;
                     if (firma is not null) Estampar(p, fuente, firma, Iniciales(nombre));
                     else avisar($"⚠ {nombre}: no encontré el espacio de firma, va sin iniciales");
                 }
@@ -288,7 +328,7 @@ public static class Recibos
 
     // Segoe Print, la letra manuscrita que trae Windows: se toma de la PC y no viaja en el .exe,
     // porque es de Microsoft. Si faltara, queda Caveat embebida (licencia OFL), igual de sencilla.
-    static readonly Lazy<byte[]> Manuscrita = new(() =>
+    internal static readonly Lazy<byte[]> Manuscrita = new(() =>
     {
         var segoe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "segoepr.ttf");
         if (File.Exists(segoe)) return File.ReadAllBytes(segoe);
@@ -298,7 +338,7 @@ public static class Recibos
         return m.ToArray();
     });
 
-    static void Estampar(PdfPageBuilder p, PdfDocumentBuilder.AddedFont fuente, Palabra firma, string texto)
+    internal static void Estampar(PdfPageBuilder p, PdfDocumentBuilder.AddedFont fuente, Palabra firma, string texto)
     {
         const double tam = 16;
         var letras = p.MeasureText(texto, tam, new PdfPoint(0, 0), fuente);
