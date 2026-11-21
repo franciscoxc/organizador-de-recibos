@@ -49,6 +49,19 @@ public partial class Ventana
     readonly Dictionary<string, FilaCliente> porCliente = new(StringComparer.OrdinalIgnoreCase);
     // «carpeta del cliente|CUIL» de los que el usuario eligió para estamparles las iniciales. Nada viene marcado.
     readonly HashSet<string> elegidos = [];
+    // Los clientes ocultos del mes, por el nombre de su carpeta: no se leen ni cuentan. Van en un archivo por mes, al lado
+    // de la memoria de lecturas pero aparte: esa se borra para releer todo con el OCR, y la lista no se tiene que ir con ella.
+    readonly HashSet<string> ocultos = new(StringComparer.OrdinalIgnoreCase);
+    bool viendoOjos, resumenListo; // el ojo de la barra está abierto; la primera pasada terminó y hay resumen del mes
+    // Los que la primera pasada todavía no leyó: si se vuelve a mostrar uno de esos, lo lee ella cuando le toque.
+    readonly HashSet<string> porRevisar = new(StringComparer.OrdinalIgnoreCase);
+    // Un cliente a la vez: el que lee la revisión y el oculto que se vuelve a mostrar no se leen juntos.
+    readonly SemaphoreSlim turnoLectura = new(1);
+    const string OjoAbierto = "\uE890", OjoCerrado = "\uED1A";
+    static string OcultosFile(int mes, int anio) =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, $"ocultos-{anio}-{mes:00}.txt");
+    bool EsOculto(FilaCliente f) => ocultos.Contains(f.Nombre);
+    bool SeVe(FilaCliente f) => viendoOjos || !EsOculto(f); // con el ojo de la barra abierto se ven todos
     // Lo que se guarda: el de todos los clientes (el botón de abajo) y el del cliente elegido (su panel).
     List<(FilaCliente Fila, Escritura E, TextBlock Marca, TextBlock Texto)> plan = [], planCliente = [];
     StackPanel? paraGuardar; // la sección «Para guardar» del cliente que muestra el panel
@@ -67,7 +80,12 @@ public partial class Ventana
     sealed class FilaCliente
     {
         public required string Ruta;
+        public string Nombre => Path.GetFileName(Ruta);
         public required Grid El;
+        public required Border OjoCaja; // a la izquierda del círculo: ancho 0 hasta que se abre el ojo de la barra
+        public required Button Ojo;
+        public required TextBlock OjoGlifo;
+        public required ScaleTransform OjoEscala;
         public required Border Tarjeta;
         public required Button Boton;
         public required Formas.Ellipse Disco;
@@ -188,6 +206,8 @@ public partial class Ventana
         Hundir(mesDespues, 0.94, si => Insinuar(si ? -8 : 0));
         Hundir(reRevisar, 0.94);
         Hundir(cambiarRaiz, 0.94);
+        ojo.Click += (_, _) => VerOjos(!viendoOjos);
+        Hundir(ojo, 0.94);
         Hundir(guardar, 0.98, objetivo: guardarCaja);
         clientesDesplazar.ScrollChanged += (_, _) => Bordes();
         // Mientras no hay revisión terminada, el botón se apaga: encendido parecería que se puede tocar.
@@ -476,6 +496,13 @@ public partial class Ventana
         CerrarPanel();
         SacarFilas(lado);
         leyendo = null;
+        // Cada mes tiene sus ocultos, y el ojo de la barra empieza cerrado.
+        viendoOjos = resumenListo = false;
+        porRevisar.Clear();
+        ocultos.Clear();
+        try { ocultos.UnionWith(File.ReadAllLines(OcultosFile(mes, anio)).Select(l => l.Trim()).Where(l => l.Length > 0)); }
+        catch { } // ese mes no tiene ocultos
+        PintarOjoBarra(animar: false);
         MostrarIcono();
         elegidos.Clear();
         Opacidad(clientesCartel, 0);
@@ -525,29 +552,40 @@ public partial class Ventana
             if (g != generacionClientes) return;
             EsconderIcono();
             foreach (var (ruta, i) in clientes.Select((c, i) => (c, i))) AgregarFila(ruta, i);
+            porRevisar.UnionWith(clientes);
+            PintarOjoBarra(animar: false);
             Acomodar();
-            foreach (var (ruta, i) in clientes.Select((c, i) => (c, i)))
+            var leidos = 0;
+            foreach (var ruta in clientes)
             {
                 corte.ThrowIfCancellationRequested();
                 var fila = porCliente[ruta];
-                EstadoClientes($"{i + 1} de {clientes.Count} · {Path.GetFileName(ruta)}");
-                Rueda(fila, true);
-                leyendo = fila;
-                if (elegida == fila && progresoCliente is { } p) p.Text = "Leyendo…";
-                var r = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, lector, mem,
-                    msg => Dispatcher.InvokeAsync(() =>
-                    {
-                        if (g != generacionClientes) return;
-                        EstadoClientes(msg);
-                        // En su panel, si está abierto, sin el nombre del cliente adelante: ya es el título.
-                        if (elegida == fila && fila.Revision is null && progresoCliente is { } t) t.Text = $"Leyendo {msg[(msg.IndexOf(": ") + 2)..]}";
-                    }), corte), corte);
-                if (g != generacionClientes) return;
-                leyendo = null;
-                Rueda(fila, false);
-                ResolverCliente(fila, r);
-                _ = Task.Run(mem.Guardar);
+                porRevisar.Remove(ruta);
+                if (EsOculto(fila)) continue; // oculto: no se lee
+                EstadoClientes($"{++leidos} de {clientes.Count(c => !ocultos.Contains(Path.GetFileName(c)))} · {fila.Nombre}");
+                await turnoLectura.WaitAsync(corte);
+                try
+                {
+                    Rueda(fila, true);
+                    leyendo = fila;
+                    if (elegida == fila && progresoCliente is { } p) p.Text = "Leyendo…";
+                    var r = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, lector, mem,
+                        msg => Dispatcher.InvokeAsync(() =>
+                        {
+                            if (g != generacionClientes) return;
+                            EstadoClientes(msg);
+                            // En su panel, si está abierto, sin el nombre del cliente adelante: ya es el título.
+                            if (elegida == fila && fila.Revision is null && progresoCliente is { } t) t.Text = $"Leyendo {msg[(msg.IndexOf(": ") + 2)..]}";
+                        }), corte), corte);
+                    if (g != generacionClientes) return;
+                    leyendo = null;
+                    Rueda(fila, false);
+                    ResolverCliente(fila, r);
+                    _ = Task.Run(mem.Guardar);
+                }
+                finally { turnoLectura.Release(); }
             }
+            resumenListo = true;
             CartelClientes();
             // Lo leído ya se puede guardar: la lectura a fondo de las hojas difíciles puede tardar, y lo que encuentre se
             // guarda después (el consolidado se completa). Para estampar iniciales, el panel de cada uno pide esperarla.
@@ -555,24 +593,32 @@ public partial class Ventana
 
             // La segunda pasada: primero se leyó todo lo fácil, para poder empezar a trabajar; ahora, de a un cliente,
             // las hojas donde no apareció nadie de la nómina, a fondo. Cada cliente se actualiza al terminar el suyo.
-            var conDificiles = porCliente.Values.Where(f => f.Dificiles > 0).OrderBy(f => f.Grupo).ThenBy(f => f.Orden).ToList();
+            var conDificiles = porCliente.Values.Where(f => f.Dificiles > 0 && !EsOculto(f)).OrderBy(f => f.Grupo).ThenBy(f => f.Orden).ToList();
             foreach (var (fila, i) in conDificiles.Select((f, i) => (f, i)))
             {
                 corte.ThrowIfCancellationRequested();
+                // Se ocultó mientras tanto, o ya lo leyó a fondo el turno de los que se vuelven a mostrar.
+                if (EsOculto(fila) || fila.Dificiles == 0) continue;
                 var antes = fila.Revision!;
                 EstadoClientes($"Hojas difíciles: {i + 1} de {conDificiles.Count} clientes · {antes.Cliente}");
-                Rueda(fila, true);
-                await Task.Run(() => Clientes.Profundizar(antes, lectorAFondo!, mem,
-                    msg => Dispatcher.InvokeAsync(() => { if (g == generacionClientes) EstadoClientes($"Hojas difíciles · {antes.Cliente}: {msg}"); }), corte), corte);
-                var r = await Task.Run(() => Clientes.Revisar(fila.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
-                if (g != generacionClientes) return;
-                Rueda(fila, false);
-                ResolverCliente(fila, r);
-                _ = Task.Run(mem.Guardar);
+                await turnoLectura.WaitAsync(corte);
+                try
+                {
+                    Rueda(fila, true);
+                    await Task.Run(() => Clientes.Profundizar(antes, lectorAFondo!, mem,
+                        msg => Dispatcher.InvokeAsync(() => { if (g == generacionClientes) EstadoClientes($"Hojas difíciles · {antes.Cliente}: {msg}"); }), corte), corte);
+                    var r = await Task.Run(() => Clientes.Revisar(fila.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                    if (g != generacionClientes) return;
+                    Rueda(fila, false);
+                    ResolverCliente(fila, r);
+                    _ = Task.Run(mem.Guardar);
+                }
+                finally { turnoLectura.Release(); }
             }
             if (conDificiles.Count > 0) CartelClientes();
+            var cuantos = porCliente.Values.Count(f => !EsOculto(f));
             EstadoClientes(lector is null ? "⚠ No pude preparar el OCR: las fotos quedaron sin leer"
-                : clientes.Count == 1 ? $"1 cliente · {TextoMes()}" : $"{clientes.Count} clientes · {TextoMes()}");
+                : cuantos == 1 ? $"1 cliente · {TextoMes()}" : $"{cuantos} clientes · {TextoMes()}");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -689,14 +735,35 @@ public partial class Ventana
         };
         var boton = new Button { Style = (Style)FindResource("Llano"), Content = cabecera };
         AutomationProperties.SetName(boton, Path.GetFileName(ruta));
+        // El ojo, a la izquierda del círculo: con el de la barra abierto crece desde ancho 0 y corre el renglón, y oculta
+        // o vuelve a mostrar a este cliente. Afuera del botón del renglón: adentro, tocarlo también abría el panel.
+        var ojoEscala = new ScaleTransform();
+        var ojoGlifo = new TextBlock
+        {
+            FontFamily = iconos, FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            RenderTransformOrigin = new(0.5, 0.5), RenderTransform = ojoEscala
+        };
+        var ojoBoton = new Button { Style = (Style)FindResource("Icono"), Width = 32, Height = AltoRenglon, HorizontalAlignment = HorizontalAlignment.Left, Content = ojoGlifo, IsTabStop = false };
+        var ojoCaja = new Border { Width = viendoOjos ? 32 : 0, ClipToBounds = true, Child = ojoBoton };
+        var renglon = new Grid { Children = { tarjeta, boton } };
+        Grid.SetColumn(renglon, 1);
         var corrida = new TranslateTransform();
-        var el = new Grid { Width = AnchoCliente, RenderTransform = corrida, Children = { tarjeta, boton } };
+        var el = new Grid
+        {
+            Width = AnchoCliente, RenderTransform = corrida,
+            ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition() },
+            Children = { ojoCaja, renglon }
+        };
         var f = new FilaCliente
         {
-            Ruta = ruta, El = el, Tarjeta = tarjeta, Boton = boton, Disco = disco, Marca = marca, Detalle = detalle, Chevron = chevron, MarcaEscala = marcaEscala,
+            Ruta = ruta, El = el, OjoCaja = ojoCaja, Ojo = ojoBoton, OjoGlifo = ojoGlifo, OjoEscala = ojoEscala, Tarjeta = tarjeta, Boton = boton, Disco = disco,
+            Marca = marca, Detalle = detalle, Chevron = chevron, MarcaEscala = marcaEscala,
             Corrida = corrida, ChevronCorrida = chevronCorrida, Orden = orden, Ruedita = ruedita, RueditaGiro = rueditaGiro
         };
         boton.Click += (_, _) => Elegir(f);
+        ojoBoton.Click += (_, _) => CambiarOculto(f);
+        Resorte.Animar((ojoCaja, "ancho"), ojoCaja.Width, v => ojoCaja.Width = Math.Max(0, v), desde: ojoCaja.Width);
+        PintarOjo(f, animar: false);
         // Al apretar se hunde apenas, y la flecha ya empieza a ir hacia el panel.
         Hundir(boton, 0.985, si =>
         {
@@ -726,6 +793,13 @@ public partial class Ventana
         };
         clientesFilas.Children.Add(el);
         porCliente[ruta] = f;
+        // El oculto no está en la lista hasta que se abre el ojo de la barra.
+        if (!SeVe(f))
+        {
+            el.Opacity = 0;
+            el.Visibility = Visibility.Collapsed;
+            return;
+        }
         // Si son muchos, entran escalonados los primeros catorce, que son los que se ven.
         Aparecer(el, corrida, desdeY: 10, espera: Math.Min(orden, 14) * 30);
     }
@@ -749,11 +823,14 @@ public partial class Ventana
     void Acomodar()
     {
         double y = 0;
-        foreach (var f in porCliente.Values.OrderBy(f => f.Orden))
+        foreach (var f in porCliente.Values.Where(SeVe).OrderBy(f => f.Orden))
         {
             var el = f.El;
             var top = y;
-            Resorte.Animar((el, "top"), top, v => Canvas.SetTop(el, v), desde: double.IsNaN(Canvas.GetTop(el)) ? top : null, rigidez: 220, rebote: 0.12);
+            // El que entra (un oculto que vuelve con el ojo abierto, todavía transparente) aparece en su lugar; los demás
+            // corren al suyo.
+            Resorte.Animar((el, "top"), top, v => Canvas.SetTop(el, v), desde: double.IsNaN(Canvas.GetTop(el)) || el.Opacity < 0.05 ? top : null,
+                rigidez: 220, rebote: 0.12);
             y += AltoRenglon;
         }
         clientesFilas.Height = y;
@@ -799,7 +876,7 @@ public partial class Ventana
         // desde el que ya está elegido.
         var repetida = buscado.All(c => c == buscado[0]);
         if (repetida) buscado = buscado[..1];
-        var filas = porCliente.Values.OrderBy(x => x.Orden).ToList();
+        var filas = porCliente.Values.Where(SeVe).OrderBy(x => x.Orden).ToList();
         var actual = filas.FindIndex(x => x.Boton.IsKeyboardFocused);
         var desde = repetida ? actual + 1 : Math.Max(actual, 0);
         filas.Skip(desde).Concat(filas.Take(desde))
@@ -810,7 +887,7 @@ public partial class Ventana
     void Mostrar(FilaCliente f)
     {
         var v = clientesDesplazar;
-        var arriba = porCliente.Values.Count(x => x.Orden < f.Orden) * AltoRenglon;
+        var arriba = porCliente.Values.Count(x => SeVe(x) && x.Orden < f.Orden) * AltoRenglon;
         var destino = arriba < v.VerticalOffset ? arriba
             : arriba + AltoRenglon > v.VerticalOffset + v.ViewportHeight ? arriba + AltoRenglon - v.ViewportHeight
             : v.VerticalOffset;
@@ -1554,10 +1631,10 @@ public partial class Ventana
 
     void CartelClientes()
     {
-        faltanClientes = porCliente.Values.Count(f => f.Grupo is 0 or 1);
-        // Arranca en 1 y rueda hasta los que faltan: empezar en 0 mostraría un «TODOS OK» de mentira.
+        faltanClientes = porCliente.Values.Count(f => !EsOculto(f) && f.Grupo is 0 or 1);
+        // Arranca en 1 y rueda hasta los que faltan: empezar en 0 mostraría un «Todos OK» de mentira.
         Resorte.Animar((clientesCartel, "n"), faltanClientes, PintarCartelClientes, desde: Math.Min(1, faltanClientes), rigidez: 90);
-        if (clientesCartel.Opacity < 0.99) Aparecer(clientesCartel, clientesCartelAltura, desdeY: 24);
+        if (clientesCartel.Opacity < 0.99) Aparecer(clientesCartel, clientesCartelAltura, desdeY: 8);
     }
 
     void PintarCartelClientes(double valor)
@@ -1565,11 +1642,14 @@ public partial class Ventana
         var k = Math.Max(1, (int)Math.Round(valor));
         // Rojo si a algún cliente le falta un recibo; amarillo si solo faltan firmas; verde si están todos; gris si no
         // hubo nada que revisar.
-        var rojo = porCliente.Values.Any(f => f.Grupo == 0);
+        // Los ocultos no cuentan.
+        var activos = porCliente.Values.Where(f => !EsOculto(f)).ToList();
+        var rojo = activos.Any(f => f.Grupo == 0);
         var (texto, icono, color) = porCliente.Count == 0 ? ("No hay clientes con sueldos", Alerta, 0)
-            // Un mes sin carpetas (todavía no empezó, o se eligió otro sin querer) no es «TODOS OK»: no se revisó nada.
-            : porCliente.Values.All(f => f.Grupo == 3) ? ($"Nada para revisar en {Clientes.NombreMes(mesElegido).ToLowerInvariant()}", Raya, 3)
-            : faltanClientes == 0 && valor < 0.5 ? ("TODOS OK", Tilde, 2)
+            : activos.Count == 0 ? ("Todos los clientes están ocultos", Raya, 3)
+            // Un mes sin carpetas (todavía no empezó, o se eligió otro sin querer) no es «Todos OK»: no se revisó nada.
+            : activos.All(f => f.Grupo == 3) ? ($"Nada para revisar en {Clientes.NombreMes(mesElegido).ToLowerInvariant()}", Raya, 3)
+            : faltanClientes == 0 && valor < 0.5 ? ("Todos OK", Tilde, 2)
             : rojo ? (k == 1 ? "Faltan recibos de 1 cliente" : $"Faltan recibos de {k} clientes", Alerta, 0)
             : (k == 1 ? "Faltan firmas de 1 cliente" : $"Faltan firmas de {k} clientes", Lapiz, 1);
         clientesCartelTexto.Text = texto;
@@ -1581,7 +1661,132 @@ public partial class Ventana
         Opacidad(clientesCartelAmarillo, color == 1 ? 1 : 0);
         Opacidad(clientesCartelVerde, color == 2 ? 1 : 0);
         Opacidad(clientesCartelGris, color == 3 ? 1 : 0);
-        clientesCartelTexto.Foreground = clientesCartelIcono.Foreground = color == 1 ? TintaOscura : Brushes.White;
+        // El texto va con la letra de siempre: el color está en el círculo. Sobre el amarillo, la marca oscura para que se lea.
+        clientesCartelIcono.Foreground = color == 1 ? TintaOscura : Brushes.White;
+    }
+
+    // ---- Los ocultos ----
+
+    // El ojo de la barra. Abierto, cada cliente muestra el suyo a la izquierda del círculo, uno tras otro, y los ocultos
+    // vuelven apagados y con el ojo cerrado. Al cerrarlo, los de ojo cerrado se van y los vecinos corren a ocupar el lugar.
+    void VerOjos(bool ver)
+    {
+        if (viendoOjos == ver) return;
+        viendoOjos = ver;
+        PintarOjoBarra(animar: true);
+        var i = 0;
+        foreach (var f in porCliente.Values.OrderBy(f => f.Orden))
+        {
+            var fila = f;
+            var oculto = EsOculto(f);
+            // Escalonados los que se ven: a partir del renglón catorce entran todos juntos.
+            if (!oculto || ver) i++;
+            Luego(Math.Min(i, 14) * 25, () => Resorte.Animar((fila.OjoCaja, "ancho"), viendoOjos ? 32 : 0, v => fila.OjoCaja.Width = Math.Max(0, v),
+                rigidez: 320, rebote: 0.2));
+            fila.Ojo.IsTabStop = ver;
+            if (!oculto) continue;
+            if (ver)
+            {
+                fila.El.Visibility = Visibility.Visible;
+                Opacidad(fila.El, 1, desde: 0);
+            }
+            else Opacidad(fila.El, 0, alTerminar: () => { if (!viendoOjos && EsOculto(fila)) fila.El.Visibility = Visibility.Collapsed; });
+        }
+        // Si el que muestra el panel se ocultó, el panel se cierra con él.
+        if (!ver && elegida is { } e && EsOculto(e)) CerrarPanel();
+        Acomodar();
+    }
+
+    // El ojo de un cliente: abierto si se ve, cerrado si está oculto. El oculto queda apagado mientras se ven todos.
+    void PintarOjo(FilaCliente f, bool animar)
+    {
+        var oculto = EsOculto(f);
+        f.OjoGlifo.Text = oculto ? OjoCerrado : OjoAbierto;
+        f.Ojo.ToolTip = oculto ? "Oculto en este mes: tocalo para volver a mostrarlo" : "Ocultarlo en este mes: no se lee ni se cuenta";
+        AutomationProperties.SetName(f.Ojo, $"{(oculto ? "Mostrar" : "Ocultar")} {f.Nombre}");
+        if (!animar)
+        {
+            f.Boton.Opacity = oculto ? 0.45 : 1;
+            return;
+        }
+        Opacidad(f.Boton, oculto ? 0.45 : 1);
+        Resorte.Animar((f.OjoGlifo, "escala"), 1, v => f.OjoEscala.ScaleX = f.OjoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
+    }
+
+    // El ojo de la barra: cerrado o abierto, y al lado cuántos hay ocultos, para que ninguno quede olvidado.
+    void PintarOjoBarra(bool animar)
+    {
+        var glifo = viendoOjos ? OjoAbierto : OjoCerrado;
+        if (ojoGlifo.Text != glifo)
+        {
+            ojoGlifo.Text = glifo;
+            if (animar) Resorte.Animar((ojoGlifo, "escala"), 1, v => ojoEscala.ScaleX = ojoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
+        }
+        var cuantos = porCliente.Values.Count(EsOculto);
+        ojoCuantos.Text = cuantos == 1 ? "1 oculto" : $"{cuantos} ocultos";
+        ojoCuantos.Visibility = cuantos > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ojo.ToolTip = viendoOjos ? "Listo: los de ojo cerrado se ocultan"
+            : cuantos > 0 ? "Ver los ocultos y elegir cuáles ocultar en este mes" : "Elegir clientes para ocultar en este mes";
+        AutomationProperties.SetName(ojo, viendoOjos ? "Terminar de elegir los ocultos" : "Elegir los clientes ocultos");
+    }
+
+    // Tocar el ojo de un cliente lo oculta o lo vuelve a mostrar, y queda guardado en el mes. El que vuelve se lee si
+    // todavía no se leyó.
+    void CambiarOculto(FilaCliente f)
+    {
+        if (!ocultos.Remove(f.Nombre)) ocultos.Add(f.Nombre);
+        try
+        {
+            var archivo = OcultosFile(mesElegido, anioElegido);
+            Directory.CreateDirectory(Path.GetDirectoryName(archivo)!);
+            File.WriteAllLines(archivo, ocultos.Order(StringComparer.OrdinalIgnoreCase));
+        }
+        catch { } // si no se puede guardar, vale para esta vez
+        PintarOjo(f, animar: true);
+        PintarOjoBarra(animar: false);
+        if (resumenListo) CartelClientes();
+        if (!EsOculto(f)) _ = LeerLosQueVolvieron();
+    }
+
+    // Los que se volvieron a mostrar y la primera pasada ya dejó atrás (los que todavía no alcanzó los lee ella): de a uno,
+    // con su turno, y con la lectura a fondo de sus hojas difíciles.
+    async Task LeerLosQueVolvieron()
+    {
+        if (memoria is not { } mem) return;
+        var g = generacionClientes;
+        var corte = corteClientes?.Token ?? CancellationToken.None;
+        var (mes, anio) = (mesElegido, anioElegido);
+        foreach (var f in porCliente.Values.Where(f => f.Revision is null && !EsOculto(f) && !porRevisar.Contains(f.Ruta) && f != leyendo).OrderBy(f => f.Orden).ToList())
+        {
+            try { await turnoLectura.WaitAsync(corte); }
+            catch (OperationCanceledException) { return; }
+            try
+            {
+                if (g != generacionClientes || EsOculto(f) || f.Revision is not null) continue;
+                Rueda(f, true);
+                leyendo = f;
+                var r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                if (g != generacionClientes) return;
+                ResolverCliente(f, r);
+                if (f.Dificiles > 0 && lectorAFondo is { } aFondo)
+                {
+                    await Task.Run(() => Clientes.Profundizar(r, aFondo, mem, _ => { }, corte), corte);
+                    r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                    if (g != generacionClientes) return;
+                    ResolverCliente(f, r);
+                }
+                _ = Task.Run(mem.Guardar);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { if (g == generacionClientes) EstadoClientes($"⚠ {f.Nombre}: {ex.Message}"); }
+            finally
+            {
+                if (leyendo == f) leyendo = null;
+                Rueda(f, false);
+                turnoLectura.Release();
+            }
+            if (resumenListo) CartelClientes();
+        }
     }
 
     // ---- El panel de la derecha ----
@@ -1660,7 +1865,7 @@ public partial class Ventana
     {
         if (guardando || planeando) return;
         planeando = true;
-        var filas = porCliente.Values.Where(f => f.Revision is not null).ToList();
+        var filas = porCliente.Values.Where(f => f.Revision is not null && !EsOculto(f)).ToList();
         var porFila = filas.ToDictionary(f => f, ElegidosDe);
         guardarTexto.Text = "Armando la lista…";
         List<(FilaCliente Fila, Escritura E)> nuevo;

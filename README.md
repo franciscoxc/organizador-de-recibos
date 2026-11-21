@@ -56,8 +56,8 @@ Windows, sin instalar nada.
 Si en la tarjeta también tiras la nómina de la declaración jurada de AFIP
 (F.931, la página «Ver Nómina» guardada como PDF), la app la lee con el OCR y
 revisa que cada empleado tenga su recibo de ese mes. La ventana se estira y
-muestra un ✓ o una ✗ por empleado, primero los que faltan, y abajo `TODOS OK` o
-cuántos recibos faltan.
+muestra un ✓ o una ✗ por empleado, primero los que faltan, y en la barra de
+estado de abajo «Todos OK» o cuántos recibos faltan.
 
 - Si los recibos están en la carpeta del mes de un cliente, no hace falta tirar
   la nómina: la busca ahí, como la pestaña Clientes (en esa carpeta y en las que
@@ -109,6 +109,11 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   lista no se reordena y se puede ir mirando lo ya revisado. El color de cada
   renglón dice cómo está. Como en el Explorador, escribir el comienzo de un nombre
   salta a ese cliente, la misma letra otra vez pasa al siguiente, y Enter lo abre.
+- Abajo, la barra de estado dice cómo está el mes. Su ojo sirve para ocultar
+  clientes en ese mes: al abrirlo, cada cliente muestra el suyo; el de ojo cerrado
+  no se lee ni se cuenta, y al cerrar el de la barra se va de la lista. Al lado
+  dice cuántos hay ocultos, y abriéndolo de nuevo se los vuelve a mostrar. Cada
+  mes tiene su lista.
 - Al tocar un cliente, a la derecha se abre un panel con sus empleados y los
   archivos en los que no encontró a nadie de la nómina (una baja, un DNI, una foto
   ilegible). Se abre también mientras se lo está leyendo, y dice por dónde va.

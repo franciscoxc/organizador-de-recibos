@@ -574,10 +574,10 @@ public partial class Ventana : Window
             if (!cartelVisible)
             {
                 cartelVisible = true;
-                // Arranca en 1 y rueda hasta los que faltan: empezar en 0 mostraría un «TODOS OK» de mentira.
+                // Arranca en 1 y rueda hasta los que faltan: empezar en 0 mostraría un «Todos OK» de mentira.
                 faltanDestino = Math.Min(1, porCuil.Values.Count(f => f.Ok == false));
                 Resorte.Animar((cartel, "n"), faltanDestino, PintarCartel, desde: faltanDestino);
-                Aparecer(cartel, cartelAltura, desdeY: 24);
+                Aparecer(cartel, cartelAltura, desdeY: 8);
             }
             Rodar();
         });
@@ -751,7 +751,7 @@ public partial class Ventana : Window
         // Sin ningún CUIL leído no hay nada que decir «OK». Si están todos pero alguno se encontró por el nombre, se dice.
         var (texto, icono, verde) = porCuil.Count == 0 ? ("No pude leer la nómina", Alerta, false)
             : faltanDestino == 0 && valor < 0.5 && resueltos
-                ? (mirar == 0 ? "TODOS OK" : mirar == 1 ? "ESTÁN TODOS · 1 PARA REVISAR" : $"ESTÁN TODOS · {mirar} PARA REVISAR", Tilde, true)
+                ? (mirar == 0 ? "Todos OK" : mirar == 1 ? "Están todos · 1 para revisar" : $"Están todos · {mirar} para revisar", Tilde, true)
             : (k == 1 ? "Falta 1 recibo de sueldo" : $"Faltan {k} recibos de sueldo", Alerta, false);
         cartelTexto.Text = texto;
         if (cartelIcono.Text != icono)

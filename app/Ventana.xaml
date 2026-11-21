@@ -214,23 +214,26 @@
                                   HorizontalScrollBarVisibility="Disabled">
                         <Canvas x:Name="filas" Height="0"/>
                     </ScrollViewer>
-                    <Grid x:Name="cartel" Height="46" Margin="0,14,0,0" Opacity="0">
+                    <!-- La barra de estado de la revisión: es información, no un botón. Sin relleno, con una raya arriba, y el
+                         color en el círculo, como en cada renglón: rojo si falta alguien, verde si están todos. -->
+                    <Grid x:Name="cartel" Height="36" Margin="0,12,0,0" Opacity="0">
                         <Grid.RenderTransform>
                             <TranslateTransform x:Name="cartelAltura"/>
                         </Grid.RenderTransform>
-                        <Border CornerRadius="10" Background="#C42B1C"/>
-                        <Border x:Name="cartelVerde" CornerRadius="10" Background="#107C10" Opacity="0"/>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <TextBlock x:Name="cartelIcono" FontFamily="{StaticResource Iconos}" FontSize="16"
-                                       Margin="0,1,10,0" VerticalAlignment="Center" Foreground="White"
-                                       RenderTransformOrigin="0.5,0.5">
-                                <TextBlock.RenderTransform>
-                                    <ScaleTransform x:Name="cartelIconoEscala"/>
-                                </TextBlock.RenderTransform>
-                            </TextBlock>
-                            <TextBlock x:Name="cartelTexto" FontFamily="{StaticResource Titulos}" FontSize="16"
-                                       FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"
-                                       AutomationProperties.LiveSetting="Polite"/>
+                        <Border BorderThickness="0,1,0,0" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"/>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,1,0,0">
+                            <Grid Width="20" Height="20" Margin="0,0,10,0">
+                                <Ellipse Fill="#C42B1C"/>
+                                <Ellipse x:Name="cartelVerde" Fill="#107C10" Opacity="0"/>
+                                <TextBlock x:Name="cartelIcono" FontFamily="{StaticResource Iconos}" FontSize="10" Foreground="White"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="cartelIconoEscala"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </Grid>
+                            <TextBlock x:Name="cartelTexto" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" AutomationProperties.LiveSetting="Polite"/>
                         </StackPanel>
                     </Grid>
                 </StackPanel>
@@ -349,34 +352,9 @@
                     </StackPanel>
                 </Grid>
 
-                <!-- Como el letrero de la nómina: rojo si falta algún recibo, amarillo si solo faltan firmas, verde
-                     cuando están todos. -->
-                <Grid x:Name="clientesCartel" Grid.Row="3" Height="46" Margin="0,12,0,0" Opacity="0">
-                    <Grid.RenderTransform>
-                        <TranslateTransform x:Name="clientesCartelAltura"/>
-                    </Grid.RenderTransform>
-                    <Border CornerRadius="10" Background="#C42B1C"/>
-                    <!-- Amarillo si solo faltan firmas: el de la carpeta del ícono, con la letra oscura. -->
-                    <Border x:Name="clientesCartelAmarillo" CornerRadius="10" Background="#EBB41C" Opacity="0"/>
-                    <Border x:Name="clientesCartelVerde" CornerRadius="10" Background="#107C10" Opacity="0"/>
-                    <!-- Gris si no hubo nada que revisar (ningún cliente tiene la carpeta del mes o su nómina): ni bien ni mal. -->
-                    <Border x:Name="clientesCartelGris" CornerRadius="10" Background="#616161" Opacity="0"/>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <TextBlock x:Name="clientesCartelIcono" FontFamily="{StaticResource Iconos}" FontSize="16"
-                                   Margin="0,1,10,0" VerticalAlignment="Center" Foreground="White" RenderTransformOrigin="0.5,0.5">
-                            <TextBlock.RenderTransform>
-                                <ScaleTransform x:Name="clientesCartelIconoEscala"/>
-                            </TextBlock.RenderTransform>
-                        </TextBlock>
-                        <TextBlock x:Name="clientesCartelTexto" FontFamily="{StaticResource Titulos}" FontSize="16"
-                                   FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"
-                                   AutomationProperties.LiveSetting="Polite"/>
-                    </StackPanel>
-                </Grid>
-
                 <!-- Guardar: abre en el panel de la derecha la lista exacta de lo que se va a guardar, con su
                      confirmación. Nada se escribe sin ese segundo clic. -->
-                <Grid x:Name="guardarCaja" Grid.Row="4" Margin="0,10,0,0">
+                <Grid x:Name="guardarCaja" Grid.Row="3" Margin="0,10,0,0">
                     <Border CornerRadius="10" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
                     <Button x:Name="guardar" Style="{StaticResource Llano}" Height="42" IsEnabled="False"
                             AutomationProperties.Name="Guardar en la carpeta de los clientes">
@@ -388,6 +366,47 @@
                                            VerticalAlignment="Center" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
                             </StackPanel>
                         </Grid>
+                    </Button>
+                </Grid>
+
+                <!-- La barra de estado del mes: es información, no un botón. Sin relleno y con una raya arriba; el color
+                     va en el círculo, como en los renglones: rojo si a alguien le falta un recibo, amarillo si solo faltan
+                     firmas, verde si están todos, gris si no hubo nada que revisar. A la derecha, el ojo: abierto, cada
+                     cliente muestra el suyo para ocultarlo (o volver a mostrarlo) en este mes. -->
+                <Grid Grid.Row="4" Height="36" Margin="0,10,0,0">
+                    <Border BorderThickness="0,1,0,0" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"/>
+                    <Grid x:Name="clientesCartel" Opacity="0" HorizontalAlignment="Left" Margin="4,1,0,0">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="clientesCartelAltura"/>
+                        </Grid.RenderTransform>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Grid Width="20" Height="20" Margin="0,0,10,0">
+                                <Ellipse Fill="#C42B1C"/>
+                                <Ellipse x:Name="clientesCartelAmarillo" Fill="#EBB41C" Opacity="0"/>
+                                <Ellipse x:Name="clientesCartelVerde" Fill="#107C10" Opacity="0"/>
+                                <Ellipse x:Name="clientesCartelGris" Fill="#616161" Opacity="0"/>
+                                <TextBlock x:Name="clientesCartelIcono" FontFamily="{StaticResource Iconos}" FontSize="10" Foreground="White"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="clientesCartelIconoEscala"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </Grid>
+                            <TextBlock x:Name="clientesCartelTexto" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" AutomationProperties.LiveSetting="Polite"/>
+                        </StackPanel>
+                    </Grid>
+                    <Button x:Name="ojo" Style="{StaticResource Icono}" HorizontalAlignment="Right" Height="36"
+                            AutomationProperties.Name="Ocultar clientes">
+                        <StackPanel Orientation="Horizontal" Margin="8,0,8,0">
+                            <TextBlock x:Name="ojoGlifo" Text="&#xED1A;" FontFamily="{StaticResource Iconos}" FontSize="14"
+                                       VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                <TextBlock.RenderTransform>
+                                    <ScaleTransform x:Name="ojoEscala"/>
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
+                            <TextBlock x:Name="ojoCuantos" FontSize="12" Margin="6,0,0,1" VerticalAlignment="Center" Visibility="Collapsed"/>
+                        </StackPanel>
                     </Button>
                 </Grid>
                 </Grid>
