@@ -57,7 +57,7 @@ public partial class Ventana
     readonly HashSet<string> porRevisar = new(StringComparer.OrdinalIgnoreCase);
     // Un cliente a la vez: el que lee la revisión y el oculto que se vuelve a mostrar no se leen juntos.
     readonly SemaphoreSlim turnoLectura = new(1);
-    const string OjoAbierto = "\uE890", OjoCerrado = "\uED1A";
+    const string GlifoOjo = "\uE890";
     static string OcultosFile(int mes, int anio) =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, $"ocultos-{anio}-{mes:00}.txt");
     bool EsOculto(FilaCliente f) => ocultos.Contains(f.Nombre);
@@ -84,7 +84,7 @@ public partial class Ventana
         public required Grid El;
         public required Border OjoCaja; // a la izquierda del círculo: ancho 0 hasta que se abre el ojo de la barra
         public required Button Ojo;
-        public required TextBlock OjoGlifo;
+        public required Formas.Line OjoRaya; // la raya del ojo cerrado
         public required ScaleTransform OjoEscala;
         public required Border Tarjeta;
         public required Button Boton;
@@ -738,12 +738,11 @@ public partial class Ventana
         // El ojo, a la izquierda del círculo: con el de la barra abierto crece desde ancho 0 y corre el renglón, y oculta
         // o vuelve a mostrar a este cliente. Afuera del botón del renglón: adentro, tocarlo también abría el panel.
         var ojoEscala = new ScaleTransform();
-        var ojoGlifo = new TextBlock
-        {
-            FontFamily = iconos, FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-            RenderTransformOrigin = new(0.5, 0.5), RenderTransform = ojoEscala
-        };
-        var ojoBoton = new Button { Style = (Style)FindResource("Icono"), Width = 32, Height = AltoRenglon, HorizontalAlignment = HorizontalAlignment.Left, Content = ojoGlifo, IsTabStop = false };
+        var ojoGlifo = new TextBlock { Text = GlifoOjo, FontFamily = iconos, FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        var ojoRaya = new Formas.Line { X1 = 2, Y1 = 2, StrokeThickness = 1.3, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
+        ojoRaya.SetBinding(Formas.Shape.StrokeProperty, new System.Windows.Data.Binding(nameof(TextBlock.Foreground)) { Source = ojoGlifo });
+        var ojoIcono = new Grid { Width = 16, Height = 16, RenderTransformOrigin = new(0.5, 0.5), RenderTransform = ojoEscala, Children = { ojoGlifo, ojoRaya } };
+        var ojoBoton = new Button { Style = (Style)FindResource("Icono"), Width = 32, Height = AltoRenglon, HorizontalAlignment = HorizontalAlignment.Left, Content = ojoIcono, IsTabStop = false };
         var ojoCaja = new Border { Width = viendoOjos ? 32 : 0, ClipToBounds = true, Child = ojoBoton };
         var renglon = new Grid { Children = { tarjeta, boton } };
         Grid.SetColumn(renglon, 1);
@@ -756,7 +755,7 @@ public partial class Ventana
         };
         var f = new FilaCliente
         {
-            Ruta = ruta, El = el, OjoCaja = ojoCaja, Ojo = ojoBoton, OjoGlifo = ojoGlifo, OjoEscala = ojoEscala, Tarjeta = tarjeta, Boton = boton, Disco = disco,
+            Ruta = ruta, El = el, OjoCaja = ojoCaja, Ojo = ojoBoton, OjoRaya = ojoRaya, OjoEscala = ojoEscala, Tarjeta = tarjeta, Boton = boton, Disco = disco,
             Marca = marca, Detalle = detalle, Chevron = chevron, MarcaEscala = marcaEscala,
             Corrida = corrida, ChevronCorrida = chevronCorrida, Orden = orden, Ruedita = ruedita, RueditaGiro = rueditaGiro
         };
@@ -1701,7 +1700,7 @@ public partial class Ventana
     void PintarOjo(FilaCliente f, bool animar)
     {
         var oculto = EsOculto(f);
-        f.OjoGlifo.Text = oculto ? OjoCerrado : OjoAbierto;
+        Tachar(f.OjoRaya, oculto, animar);
         f.Ojo.ToolTip = oculto ? "Oculto en este mes: tocalo para volver a mostrarlo" : "Ocultarlo en este mes: no se lee ni se cuenta";
         AutomationProperties.SetName(f.Ojo, $"{(oculto ? "Mostrar" : "Ocultar")} {f.Nombre}");
         if (!animar)
@@ -1710,24 +1709,40 @@ public partial class Ventana
             return;
         }
         Opacidad(f.Boton, oculto ? 0.45 : 1);
-        Resorte.Animar((f.OjoGlifo, "escala"), 1, v => f.OjoEscala.ScaleX = f.OjoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
+        Resorte.Animar((f.OjoEscala, "escala"), 1, v => f.OjoEscala.ScaleX = f.OjoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
     }
 
     // El ojo de la barra: cerrado o abierto, y al lado cuántos hay ocultos, para que ninguno quede olvidado.
     void PintarOjoBarra(bool animar)
     {
-        var glifo = viendoOjos ? OjoAbierto : OjoCerrado;
-        if (ojoGlifo.Text != glifo)
-        {
-            ojoGlifo.Text = glifo;
-            if (animar) Resorte.Animar((ojoGlifo, "escala"), 1, v => ojoEscala.ScaleX = ojoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
-        }
+        Tachar(ojoRaya, !viendoOjos, animar);
+        if (animar) Resorte.Animar((ojoEscala, "escala"), 1, v => ojoEscala.ScaleX = ojoEscala.ScaleY = v, desde: 0.5, rigidez: 420, rebote: 0.4);
         var cuantos = porCliente.Values.Count(EsOculto);
         ojoCuantos.Text = cuantos == 1 ? "1 oculto" : $"{cuantos} ocultos";
         ojoCuantos.Visibility = cuantos > 0 ? Visibility.Visible : Visibility.Collapsed;
         ojo.ToolTip = viendoOjos ? "Listo: los de ojo cerrado se ocultan"
             : cuantos > 0 ? "Ver los ocultos y elegir cuáles ocultar en este mes" : "Elegir clientes para ocultar en este mes";
         AutomationProperties.SetName(ojo, viendoOjos ? "Terminar de elegir los ocultos" : "Elegir los clientes ocultos");
+    }
+
+    // La raya del ojo cerrado, encima del ojo abierto: al cerrarlo se dibuja de punta a punta, y al abrirlo se recoge. Va
+    // aparte del glifo porque el del ojo tachado («Hide», ED1A) no está en la Segoe MDL2 de Windows 10: en la PC de la
+    // oficina el ojo cerrado era un rectángulo vacío (21/11/2026). El abierto (E890) sí está en las dos.
+    static void Tachar(Formas.Line raya, bool cerrado, bool animar)
+    {
+        void Poner(double p)
+        {
+            raya.X2 = raya.X1 + 12 * p;
+            raya.Y2 = raya.Y1 + 12 * p;
+            raya.Opacity = Math.Clamp(p * 4, 0, 1); // sin largo, la punta redonda dejaría un punto
+        }
+        var destino = cerrado ? 1 : 0;
+        if (animar) Resorte.Animar((raya, "raya"), destino, Poner, rigidez: 380, rebote: 0.1);
+        else
+        {
+            Poner(destino);
+            Resorte.Animar((raya, "raya"), destino, Poner, desde: destino);
+        }
     }
 
     // Tocar el ojo de un cliente lo oculta o lo vuelve a mostrar, y queda guardado en el mes. El que vuelve se lee si

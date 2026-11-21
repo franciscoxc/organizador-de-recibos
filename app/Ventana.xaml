@@ -399,12 +399,16 @@
                     <Button x:Name="ojo" Style="{StaticResource Icono}" HorizontalAlignment="Right" Height="36"
                             AutomationProperties.Name="Ocultar clientes">
                         <StackPanel Orientation="Horizontal" Margin="8,0,8,0">
-                            <TextBlock x:Name="ojoGlifo" Text="&#xED1A;" FontFamily="{StaticResource Iconos}" FontSize="14"
-                                       VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
-                                <TextBlock.RenderTransform>
+                            <!-- El ojo es siempre el abierto, y la raya del cerrado se dibuja encima (ver Tachar). -->
+                            <Grid Width="16" Height="16" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                <Grid.RenderTransform>
                                     <ScaleTransform x:Name="ojoEscala"/>
-                                </TextBlock.RenderTransform>
-                            </TextBlock>
+                                </Grid.RenderTransform>
+                                <TextBlock x:Name="ojoGlifo" Text="&#xE890;" FontFamily="{StaticResource Iconos}" FontSize="14"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Line x:Name="ojoRaya" X1="2" Y1="2" X2="14" Y2="14" StrokeThickness="1.4" StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round" Stroke="{Binding Foreground, ElementName=ojoGlifo}"/>
+                            </Grid>
                             <TextBlock x:Name="ojoCuantos" FontSize="12" Margin="6,0,0,1" VerticalAlignment="Center" Visibility="Collapsed"/>
                         </StackPanel>
                     </Button>
