@@ -1,3 +1,4 @@
+using System.Text.Json;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 using UglyToad.PdfPig.Core;
@@ -842,6 +843,95 @@ public class ClientesTests(ITestOutputHelper salida)
         finally { Directory.Delete(raiz, true); }
     }
 
+    [Fact]
+    public async Task Separar_busca_la_nomina_en_la_carpeta_del_mes_como_Clientes()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            // Los recibos en la carpeta del mes y la nómina adentro, en «SUSS Y SIND», como los deja el estudio.
+            var mes = Mes(Cliente(raiz, "PEREZ JUAN", conFirmados: false));
+            var recibos = Path.Combine(mes, "PEREZ JUAN RECIBOS 10 2026.PDF");
+            var n = Assert.Single((await Recibos.Procesar([recibos], null, _ => { }, iniciales: false)).Nominas);
+            Assert.EndsWith("PEREZ JUAN SUSS NOMINA 10 2026.pdf", n.Ruta);
+            Assert.Equal([Gomez, Rojas, Lopez, Ruiz], n.Empleados);
+            var revision = Recibos.Revisar(n, [Path.Combine(mes, "PEREZ JUAN")]);
+            Assert.Equal([Ruiz], revision.Where(x => x.Recibo is null).Select(x => x.Empleado));
+            Assert.DoesNotContain(revision, x => x.PorNombre);
+
+            // Con esa misma ya cargada, no se vuelve a leer. La de otro cliente del mismo mes no la reemplaza: no trae a nadie
+            // de estos recibos.
+            Assert.Empty((await Recibos.Procesar([recibos], null, _ => { }, iniciales: false, conocida: n)).Nominas);
+            var ajena = new Nomina("ajena.pdf", 10, "2026", [new("20-22333444-0", "QUIROGA ZOE")]);
+            Assert.Single((await Recibos.Procesar([recibos], null, _ => { }, iniciales: false, conocida: ajena)).Nominas);
+
+            // Una foto sin rótulo, sin período y sin CUIL, entre los firmados que nombran el mes («RECIBOS FIRMADOS 10 2026», como
+            // los de un cliente real): el mes y la nómina salen de la carpeta del mes, y el empleador, de los recibos sin firmar.
+            var firmados = Directory.CreateDirectory(Path.Combine(mes, "RECIBOS FIRMADOS 10 2026")).FullName;
+            var foto = Path.Combine(firmados, "FOTO.pdf");
+            Pdf(foto, [("RUIZ LUIS", 40, 760), ("FIRMA DEL EMPLEADO", 350, 200)]);
+            Assert.Equal(Path.Combine(firmados, "PEREZ JUAN", "RUIZ LUIS 10 2026.pdf"),
+                Assert.Single((await Recibos.Procesar([foto], null, _ => { }, iniciales: false)).Creados));
+
+            // Fuera de una carpeta del mes no se busca, como en Clientes: Descargas puede tener las de otros clientes.
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            File.Copy(recibos, Path.Combine(descargas, "RECIBOS.pdf"));
+            Pdf(Path.Combine(descargas, "NOMINA 10 2026.pdf"), Nomina(Gomez, Rojas, Lopez, Ruiz));
+            Assert.Empty((await Recibos.Procesar([Path.Combine(descargas, "RECIBOS.pdf")], null, _ => { }, iniciales: false)).Nominas);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Separar_guarda_lo_que_encuentra_por_el_nombre()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var mes = Mes(Cliente(raiz, "PEREZ JUAN", conFirmados: false));
+            // La nómina pone a López con el nombre primero; su recibo sin firmar, como siempre.
+            Pdf(Path.Combine(mes, "SUSS Y SIND", "PEREZ JUAN SUSS NOMINA 10 2026.pdf"), Nomina(Gomez, Rojas, Lopez with { Nombre = "ANA LOPEZ" }, Ruiz));
+            // Un escaneo con lo que dejó el OCR: Gómez se lee entera; de Rojas, el recibo pero no el CUIL; la tercera hoja trae
+            // dos recibos sin el rótulo del nombre, el de Ruiz con su CUIL y el de López solo con su nombre (que va primero en
+            // la carpeta: así, si la revisión mirara el texto de la hoja, le daría a Ruiz el archivo de López); la cuarta no se
+            // lee.
+            var escaneo = Path.Combine(mes, "ESCANEO 10 2026.pdf");
+            Pdf(escaneo, Recibo(Gomez),
+                Recibo(Rojas).Select(t => t.Item1 == Rojas.Cuil ? ("2?-4??78901-4", t.Item2, t.Item3) : t).ToArray(),
+                [("CUIL 20-11222333-9 RUIZ LUIS", 40, 760), ("LOPEZ ANA", 300, 760), ("FIRMA DEL EMPLEADO", 350, 200)],
+                [("a o 1 / . ;", 40, 400)]);
+            var avisos = new List<string>();
+            var r = await Recibos.Procesar([escaneo], null, avisos.Add, iniciales: false);
+
+            // López, encontrado con la nómina, se llama como en su recibo sin firmar; Ruiz no tiene, y queda como en la nómina.
+            var carpeta = Path.Combine(mes, "PEREZ JUAN");
+            Assert.Equal(new[] { "GOMEZ LUCIA", "ROJAS PABLO", "LOPEZ ANA", "RUIZ LUIS" }.Select(x => $"{x} 10 2026.pdf").Order(),
+                r.Creados.Select(Path.GetFileName).Order());
+            // Los encontrados por el nombre llevan la marca, como los que guarda Clientes; Ruiz, por su CUIL, no.
+            foreach (var (archivo, marca) in new[] { ("GOMEZ LUCIA", false), ("ROJAS PABLO", true), ("LOPEZ ANA", true), ("RUIZ LUIS", false) })
+            {
+                using var d = PdfDocument.Open(Path.Combine(carpeta, $"{archivo} 10 2026.pdf"));
+                Assert.Equal(marca, d.Information.Keywords!.Contains("por nombre"));
+            }
+            // Cada uno con su archivo, aunque la hoja de López traiga el CUIL de Ruiz.
+            var revision = Recibos.Revisar(Assert.Single(r.Nominas), [carpeta]);
+            Assert.All(revision, x => Assert.StartsWith(Path.Combine(carpeta, x.Empleado.Cuil == Lopez.Cuil ? "LOPEZ ANA" : x.Empleado.Nombre), x.Recibo));
+            Assert.Equal([Rojas.Cuil, Lopez.Cuil], revision.Where(x => x.PorNombre).Select(x => x.Empleado.Cuil));
+
+            // En el combinado, la hoja de los dos recibos va una sola vez, con los dos; López, «POR NOMBRE».
+            using (var d = PdfDocument.Open(Assert.Single(r.Combinados)))
+            {
+                Assert.Equal(3, d.NumberOfPages);
+                var quienes = string.Concat(d.GetPage(3).Letters.Where(l => l.RenderingMode == TextRenderingMode.Neither).Select(l => l.Value)).Replace(" ", "");
+                Assert.Contains($"CUIL{Ruiz.Cuil}", quienes);
+                Assert.Contains($"PORNOMBRE{Lopez.Cuil}", quienes);
+            }
+            // La que no tiene a nadie sigue avisando, como antes.
+            Assert.Contains("hoja 4", Assert.Single(avisos, a => a.StartsWith('⚠')));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
     // Con el OCR de la app sobre clientes reales: si junto al proyecto hay una carpeta «prueba-clientes» (copia de
     // algunos clientes, que no va al git), se revisa entera y se cuenta qué se encontró. Sin ella, pasa vacía.
     [Fact]
@@ -878,4 +968,67 @@ public class ClientesTests(ITestOutputHelper salida)
         }
 
     }
+
+    // Las muestras de problemas reales: si al lado del proyecto está la carpeta «muestras-recibos» (copias de los recibos que
+    // trajeron un problema; no van al git porque son personas reales), cada caso de su casos.json se revisa como lo haría la
+    // app y se compara con lo que tiene que dar. Sin la carpeta, como en GitHub, pasa vacía. Lo leído con OCR queda en su
+    // memoria.json; para releer todo con el OCR, se borra.
+    [Fact]
+    public async Task Revisa_las_muestras_de_problemas_reales()
+    {
+        var raiz = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../muestras-recibos"));
+        if (!File.Exists(Path.Combine(raiz, "casos.json"))) return;
+        var casos = JsonSerializer.Deserialize<List<Muestra>>(File.ReadAllText(Path.Combine(raiz, "casos.json")),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        var ocr = WindowsOcr.Crear();
+        var lectores = Lector.Crear();
+        Assert.NotNull(lectores);
+        var (rapido, aFondo) = lectores.Value;
+        var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+        var fallas = new List<string>();
+        void Comparar(string caso, string que, int? espera, int hay)
+        {
+            salida.WriteLine($"{caso}: {que} {hay}{(espera is { } n && n != hay ? $", TENDRÍA QUE SER {n}" : "")}");
+            if (espera is { } e && e != hay) fallas.Add($"{caso}: {que} {hay}, tendría que ser {e}");
+        }
+        foreach (var c in casos)
+        {
+            if (c.Clientes is { } esperado)
+            {
+                var cliente = Path.Combine(raiz, c.Cliente);
+                var r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None);
+                if (await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None) > 0)
+                    r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None);
+                var plan = Clientes.Planear(r, new HashSet<string>());
+                Comparar(c.Caso, "faltan", esperado.Faltan, r.Faltan);
+                Comparar(c.Caso, "por nombre", esperado.PorNombre, r.Renglones.Count(x => x.Firma == Firma.PorNombre));
+                Comparar(c.Caso, "corregidos", esperado.Corregidos, plan.Count(p => p.Accion == Accion.Corregido));
+                Comparar(c.Caso, "hojas del consolidado", esperado.HojasDelConsolidado,
+                    plan.FirstOrDefault(p => p.Accion == Accion.Consolidado)?.Hojas.Count ?? 0);
+                // El último recurso, con las iniciales del estudio para todos los que no tienen el firmado.
+                Comparar(c.Caso, "con iniciales", esperado.Iniciales,
+                    Clientes.Planear(r, r.Renglones.Select(x => x.Empleado.Cuil).ToHashSet()).Count(p => p.Accion == Accion.Iniciales));
+            }
+            if (c.Separar is { } separar)
+            {
+                // Lo separado va a una carpeta temporal: en las muestras no se escribe nada.
+                var tmp = Directory.CreateTempSubdirectory().FullName;
+                try
+                {
+                    var r = await Recibos.Procesar([Path.Combine(raiz, separar.Pdf)], ocr, _ => { }, tmp, iniciales: false);
+                    Comparar(c.Caso, "separados", separar.Recibos, r.Creados.Count);
+                    var revision = r.Nominas.Count == 1 ? Recibos.Revisar(r.Nominas[0], Directory.GetDirectories(tmp)) : [];
+                    Comparar(c.Caso, "separados por el nombre", separar.PorNombre, revision.Count(x => x.PorNombre));
+                    Comparar(c.Caso, "faltan al separar", separar.Faltan, r.Nominas.Count == 1 ? revision.Count(x => x.Recibo is null) : -1);
+                }
+                finally { Directory.Delete(tmp, true); }
+            }
+        }
+        memoria.Guardar();
+        Assert.True(fallas.Count == 0, string.Join("\n", fallas));
+    }
+
+    record Muestra(string Caso, string Cliente, int Mes, int Anio, EnClientes? Clientes, EnSeparar? Separar);
+    record EnClientes(int? Faltan, int? PorNombre, int? Corregidos, int? HojasDelConsolidado, int? Iniciales);
+    record EnSeparar(string Pdf, int? Recibos, int? PorNombre, int? Faltan);
 }

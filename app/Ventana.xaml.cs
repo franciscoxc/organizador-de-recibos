@@ -45,13 +45,19 @@ public partial class Ventana : Window
 
     sealed class Fila
     {
-        public required Grid El;
+        public required FrameworkElement El;
+        public required Button Boton;
+        public required Border Caja; // debajo del nombre, sus hojas: se abre al tocarlo
+        public required StackPanel Adentro;
         public required Formas.Ellipse Disco;
         public required TextBlock Marca, Nombre, Cuil;
         public required ScaleTransform MarcaEscala;
         public required TranslateTransform Corrida;
         public required int Orden;
         public bool? Ok; // null: todavía sin revisar, un punto gris
+        public bool PorNombre; // está su recibo, pero lo encontré por el nombre: hay que mirarlo
+        public string? Recibo, Cargado; // su recibo, y el que ya se dibujó en la caja
+        public bool Abierta;
     }
 
     public Ventana(string[] files)
@@ -101,6 +107,9 @@ public partial class Ventana : Window
             Tragar();
             _ = ProcessAll(dropped);
         };
+        // Otra resolución u otra escala de pantalla: la ventana se vuelve a acomodar para entrar entera.
+        SystemParameters.StaticPropertyChanged += (_, e) => { if (e.PropertyName == nameof(SystemParameters.WorkArea)) Dispatcher.BeginInvoke(Reencuadrar); };
+        DpiChanged += (_, _) => Dispatcher.BeginInvoke(Reencuadrar);
         ContentRendered += async (_, _) =>
         {
             AddToSendTo();
@@ -151,6 +160,7 @@ public partial class Ventana : Window
         var r = new Resultado([], [], [], []);
         var iniciales = estampar.IsChecked == true; // se lee acá: la casilla no se puede tocar desde otro hilo
         var negado = false;
+        var conocida = nomina; // la que ya estaba cargada: con ella también se encuentra a quien la hoja no nombra bien
         try
         {
             // La pregunta se hace en el hilo de la ventana; Procesar espera la respuesta en el suyo.
@@ -168,7 +178,7 @@ public partial class Ventana : Window
                 else if (msg.StartsWith('✓')) Separado(msg[2..]);
                 else if (msg.StartsWith('▤')) Juntado(msg[2..]);
                 else Estado(msg);
-            }), iniciales: iniciales, permiso: Permiso));
+            }), iniciales: iniciales, permiso: Permiso, conocida: conocida));
             escribiendo = false; // lo que sigue solo lee: ya se puede cerrar
             RecordarCarpetas([.. r.Creados, .. r.YaEstaban]);
             foreach (var f in r.Creados) FichaDe(f).Archivo ??= f;
@@ -229,9 +239,17 @@ public partial class Ventana : Window
     {
         avisos.Text = texto;
         avisos.Visibility = texto.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (texto.Length == 0) return;
-        Opacidad(avisos, 1, desde: 0);
-        Encuadrar();
+        if (texto.Length > 0) Opacidad(avisos, 1, desde: 0);
+        Reencuadrar();
+    }
+
+    // Cambió el alto de lo que hay arriba de la revisión (un aviso que aparece o se va) o la pantalla (otra resolución, otra
+    // escala): la lista de la revisión toma lo que sobre, con su barra de desplazamiento, y la ventana no se pasa de la
+    // pantalla. Sin revisión, la ventana solo sube si hace falta.
+    void Reencuadrar()
+    {
+        if (mostrada is not null && !enClientes) Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => { if (mostrada is not null && !enClientes) Crecer(true); });
+        else Encuadrar();
     }
 
     // Si lo que se agregó (una ficha, un aviso) estira la ventana más allá del borde de abajo, la ventana sube
@@ -504,7 +522,7 @@ public partial class Ventana : Window
     // un punto gris, cada marca se resuelve a su turno y al final los que faltan suben al principio. Con la
     // misma nómina (llegaron los recibos después), solo cambian las marcas que cambiaron, esos renglones
     // viajan a su grupo y el número del letrero rueda hacia abajo.
-    void MostrarRevision(Nomina n, List<(Empleado Empleado, string? Recibo)> revision)
+    void MostrarRevision(Nomina n, List<(Empleado Empleado, string? Recibo, bool PorNombre)> revision)
     {
         generacion++;
         var nueva = !ReferenceEquals(n, mostrada);
@@ -520,7 +538,7 @@ public partial class Ventana : Window
 
         double y = 0;
         int i = 0, turno = 0;
-        foreach (var (e, recibo) in revision)
+        foreach (var (e, recibo, porNombre) in revision)
         {
             var ok = recibo is not null;
             if (!porCuil.TryGetValue(e.Cuil, out var f))
@@ -539,11 +557,11 @@ public partial class Ventana : Window
             // El que está se muestra como su archivo, que sale del texto del recibo y es exacto; el que falta,
             // como lo leyó el OCR en la nómina, que puede tener algún error: por eso lleva el CUIL.
             var nombre = ok ? Path.GetFileName(recibo!)[..^Recibos.Sufijo(n).Length] : e.Nombre.Length > 0 ? e.Nombre : e.Cuil;
-            if (f.Ok != ok)
+            if (f.Ok != ok || f.PorNombre != porNombre || f.Recibo != recibo)
             {
                 var fila = f;
                 var cuil = e.Cuil;
-                Despues((nueva ? 280 : 120) + Math.Min(turno++, 14) * 70, () => Resolver(fila, ok, nombre, cuil));
+                Despues((nueva ? 280 : 120) + Math.Min(turno++, 14) * 70, () => Resolver(fila, ok, porNombre, nombre, cuil, recibo));
             }
             i++;
         }
@@ -579,9 +597,8 @@ public partial class Ventana : Window
         var textos = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Children = { nombre, cuil } };
         Grid.SetColumn(textos, 1);
         var corrida = new TranslateTransform();
-        var el = new Grid
+        var linea = new Grid
         {
-            Width = AnchoFila, Margin = new(0, 4, 0, 4), RenderTransform = corrida,
             ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition() },
             Children =
             {
@@ -589,30 +606,121 @@ public partial class Ventana : Window
                 textos
             }
         };
-        return new Fila { El = el, Disco = disco, Marca = marca, Nombre = nombre, Cuil = cuil, MarcaEscala = marcaEscala, Corrida = corrida, Orden = orden };
+        // Como los renglones de Clientes: el renglón es un botón, y lo que abre aparece debajo, alineado con el nombre.
+        var boton = new Button { Style = (Style)FindResource("Llano"), Content = linea, HorizontalContentAlignment = HorizontalAlignment.Stretch, IsHitTestVisible = false, Focusable = false };
+        var adentro = new StackPanel();
+        var caja = new Border { Height = 0, ClipToBounds = true, Child = adentro, Margin = new(38, 0, 0, 0) };
+        Resorte.Animar((caja, "alto"), 0, v => caja.Height = Math.Max(0, v), desde: 0);
+        var el = new StackPanel { Width = AnchoFila, Margin = new(0, 4, 0, 4), RenderTransform = corrida, Children = { boton, caja } };
+        var f = new Fila { El = el, Boton = boton, Caja = caja, Adentro = adentro, Disco = disco, Marca = marca, Nombre = nombre, Cuil = cuil, MarcaEscala = marcaEscala, Corrida = corrida, Orden = orden };
+        boton.Click += async (_, _) => await VerRecibo(f);
+        return f;
     }
 
-    // La marca pasa del punto gris a la tilde o a la cruz con un rebote chico.
-    void Resolver(Fila f, bool ok, string nombre, string cuil)
+    // Tocar a alguien que tiene su recibo lo abre ahí mismo con sus hojas, como en Clientes: así se ve si es el suyo (sobre
+    // todo el encontrado por el nombre), y tocar una hoja la abre entera. Otro toque lo cierra.
+    async Task VerRecibo(Fila f)
+    {
+        if (f.Recibo is not { } recibo) return;
+        f.Abierta = !f.Abierta;
+        if (f.Abierta && f.Cargado != recibo)
+        {
+            f.Cargado = recibo;
+            f.Adentro.Children.Clear();
+            f.Adentro.Children.Add(Nota("Cargando…"));
+            AbrirCaja(f);
+            List<UIElement> cargado;
+            try
+            {
+                var n = await Task.Run(() => { using var d = UglyToad.PdfPig.PdfDocument.Open(recibo); return d.NumberOfPages; });
+                var leyenda = f.PorNombre ? "Lo encontré por el nombre: fijate que sea el suyo. Tocá la hoja para verla entera." : null;
+                // La hoja, del alto que entra en la lista sin perder el renglón de arriba; entera, con un toque.
+                var maxAlto = Math.Clamp(desplazar.MaxHeight - 90, 140, 320);
+                cargado = await Hojas([.. Enumerable.Range(1, n).Select(i => new Hallazgo(recibo, i, new Lectura("")))], leyenda, maxAlto)!();
+            }
+            catch (Exception ex) { cargado = [Nota($"No pude mostrarlo: {ex.Message}")]; }
+            f.Adentro.Children.Clear();
+            foreach (var c in cargado) f.Adentro.Children.Add(c);
+        }
+        AbrirCaja(f);
+    }
+
+    // La caja crece o se achica con resorte, y los renglones de abajo la siguen cuadro a cuadro. La ventana le hace lugar
+    // antes de abrirla; al cerrarla, recién cuando terminó, para no cortarla en el camino.
+    void AbrirCaja(Fila f)
+    {
+        f.Adentro.Measure(new Size(Math.Max(100, AnchoFila - 38), double.PositiveInfinity));
+        var alto = f.Abierta ? f.Adentro.DesiredSize.Height : 0;
+        if (alto > f.Caja.Height)
+        {
+            filas.Height += alto - f.Caja.Height;
+            Crecer(true);
+        }
+        Resorte.Animar((f.Caja, "alto"), alto, v =>
+        {
+            f.Caja.Height = Math.Max(0, v);
+            AcomodarFilas();
+        }, rigidez: 260, rebote: 0.1, alLlegar: () =>
+        {
+            Crecer(true);
+            // El renglón entero, con su nombre arriba: así se sabe de quién es la hoja que se abrió.
+            if (f.Abierta) f.El.BringIntoView();
+        });
+    }
+
+    // Cada renglón a su lugar según el alto que tiene ahora, de una: lo mueve la caja que se abre, que ya va con resorte.
+    // El estado del resorte de cada uno queda ahí mismo, para que el próximo viaje salga desde donde está.
+    void AcomodarFilas()
+    {
+        double y = 0;
+        foreach (var f in EnOrden())
+        {
+            var el = f.El;
+            var top = y;
+            Canvas.SetTop(el, top);
+            Resorte.Animar((el, "top"), top, v => Canvas.SetTop(el, v), desde: top);
+            el.Measure(new Size(AnchoFila, double.PositiveInfinity));
+            y += el.DesiredSize.Height;
+        }
+        filas.Height = y;
+    }
+
+    // Los que faltan arriba, después los que hay que mirar, cada grupo en el orden de la nómina.
+    IEnumerable<Fila> EnOrden() => porCuil.Values.OrderBy(f => f.Ok != true ? 0 : f.PorNombre ? 1 : 2).ThenBy(f => f.Orden);
+
+    // La marca pasa del punto gris a la tilde o a la cruz con un rebote chico. Debajo del nombre va el CUIL del que falta;
+    // en el que se encontró por el nombre, que hay que mirarlo, dicho como en Clientes.
+    void Resolver(Fila f, bool ok, bool porNombre, string nombre, string cuil, string? recibo)
     {
         f.Ok = ok;
+        f.PorNombre = porNombre;
+        // Con recibo, el renglón se puede tocar para verlo; si cambió el que se estaba mostrando, se cierra.
+        f.Recibo = recibo;
+        f.Boton.IsHitTestVisible = f.Boton.Focusable = recibo is not null;
+        if (f.Abierta && f.Cargado != recibo)
+        {
+            f.Abierta = false;
+            AbrirCaja(f);
+        }
         f.Nombre.Text = nombre;
-        f.Cuil.Text = $"CUIL {cuil}";
-        f.Cuil.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
+        f.Cuil.Text = porNombre ? "encontrado por el nombre: ilegible, revisar" : $"CUIL {cuil}";
+        f.Cuil.Visibility = ok && !porNombre ? Visibility.Collapsed : Visibility.Visible;
         f.Disco.Fill = ok ? Verde : Rojo;
         f.Marca.Text = ok ? Tilde : Cruz;
-        f.El.ToolTip = $"{nombre} (CUIL {cuil})";
-        AutomationProperties.SetName(f.El, $"{nombre}: {(ok ? "tiene su recibo" : "falta su recibo")}");
+        f.Boton.ToolTip = porNombre ? $"{nombre} (CUIL {cuil}): el CUIL no se leía bien y lo encontré por el nombre. Tocalo para ver el recibo"
+            : ok ? $"{nombre} (CUIL {cuil}). Tocalo para ver el recibo" : $"{nombre} (CUIL {cuil})";
+        AutomationProperties.SetName(f.Boton, $"{nombre}: {(porNombre ? "encontrado por el nombre, revisar" : ok ? "tiene su recibo" : "falta su recibo")}");
+        AutomationProperties.SetHelpText(f.Boton, ok ? "Ver el recibo" : "");
         Resorte.Animar((f, "marca"), 1, v => f.MarcaEscala.ScaleX = f.MarcaEscala.ScaleY = v, desde: 0.45, velocidad: 3, rigidez: 420, rebote: 0.4);
         if (cartelVisible) Rodar();
     }
 
-    // Los que faltan arriba, cada grupo en el orden de la nómina. Cada renglón viaja a su lugar y los vecinos
-    // le hacen lugar.
+    // Los que faltan arriba, después los que hay que mirar, cada grupo en el orden de la nómina. Cada renglón viaja a su
+    // lugar y los vecinos le hacen lugar.
     void Ordenar()
     {
         double y = 0;
-        foreach (var f in porCuil.Values.OrderBy(f => f.Ok == true).ThenBy(f => f.Orden))
+        foreach (var f in EnOrden())
         {
             var el = f.El;
             el.Measure(new Size(AnchoFila, double.PositiveInfinity));
@@ -639,9 +747,11 @@ public partial class Ventana : Window
     {
         var k = Math.Max(1, (int)Math.Round(valor));
         var resueltos = porCuil.Values.All(f => f.Ok is not null);
-        // Sin ningún CUIL leído no hay nada que decir «OK».
+        var mirar = porCuil.Values.Count(f => f.Ok == true && f.PorNombre);
+        // Sin ningún CUIL leído no hay nada que decir «OK». Si están todos pero alguno se encontró por el nombre, se dice.
         var (texto, icono, verde) = porCuil.Count == 0 ? ("No pude leer la nómina", Alerta, false)
-            : faltanDestino == 0 && valor < 0.5 && resueltos ? ("TODOS OK", Tilde, true)
+            : faltanDestino == 0 && valor < 0.5 && resueltos
+                ? (mirar == 0 ? "TODOS OK" : mirar == 1 ? "ESTÁN TODOS · 1 PARA REVISAR" : $"ESTÁN TODOS · {mirar} PARA REVISAR", Tilde, true)
             : (k == 1 ? "Falta 1 recibo de sueldo" : $"Faltan {k} recibos de sueldo", Alerta, false);
         cartelTexto.Text = texto;
         if (cartelIcono.Text != icono)
@@ -667,7 +777,13 @@ public partial class Ventana : Window
         // ubica 40 px más abajo de lo que debe y el letrero queda detrás de la barra de tareas.
         UpdateLayout();
         var area = SystemParameters.WorkArea;
-        var resto = ActualHeight - seccion.ActualHeight;
+        // Lo de arriba de la sección se mide, no se deduce del alto de la ventana. Mientras la sección se anima, la ventana
+        // está en SizeToContent.Manual y no crece con lo que aparece: los avisos que llegan al final de la tanda no entraban
+        // en ActualHeight, la lista quedaba más alta de lo que cabía y el letrero se cortaba detrás de la barra de tareas
+        // (en 1680×1050, con los siete avisos de las iniciales de un escaneo, el 21/11/2026).
+        todo.Measure(new Size(todo.ActualWidth + todo.Margin.Left + todo.Margin.Right, double.PositiveInfinity));
+        var marco = ActualHeight - ((FrameworkElement)Content).ActualHeight;
+        var resto = marco + todo.DesiredSize.Height - seccion.ActualHeight;
         // ponytail-keep: el alto se suma a mano. Medir seccionContenido entero devolvía el alto que tenía la
         // lista en la pasada de diseño anterior (0 la primera vez, 288 cuando ya medía 387): los contenedores
         // guardan su medida hasta la próxima pasada, y el letrero quedaba afuera de la ventana.

@@ -249,6 +249,89 @@ public static class Clientes
         return lista;
     }
 
+    /// <summary>Los de la nómina que están en una hoja sin su CUIL entero, además de los que están por su CUIL («porCuil»):
+    /// los de Nombrados y, si no hay nadie, el del nombre del archivo. Los que se encuentran así quedan para revisar. Lo usan
+    /// la revisión de los firmados y Separar, con las hojas que no pudo leer como recibo.</summary>
+    public static List<Empleado> QuienesSinCuil(string texto, string archivo, int hojas, IReadOnlyList<Empleado> nomina,
+        ICollection<string> porCuil, string empleador)
+    {
+        var lista = Nombrados(texto, nomina, porCuil, empleador);
+        // Lo último: el nombre del archivo. Las fotos se guardan con el del empleado («PEREZ JUAN RECIBO OCT 2026.jpeg»), y
+        // en octubre las que el OCR no leía eran justo esas. Solo en archivos de una hoja (un PDF con varios recibos se llama
+        // como uno solo, o como ninguno), y nunca en una baja, un alta o un DNI.
+        if (porCuil.Count == 0 && lista.Count == 0 && hojas == 1 && !EsOtroDocumento(Path.GetFileName(archivo) + " " + texto)
+            && PorNombre(Path.GetFileNameWithoutExtension(archivo), nomina) is { } q)
+            lista.Add(q);
+        return lista;
+    }
+
+    /// <summary>Una constancia de ARCA (alta, baja o modificación): nunca es un recibo, aunque traiga el CUIL.</summary>
+    public static bool EsConstancia(string texto) => Normal(texto).Contains("CONSTANCIA DEL TRABAJADOR");
+
+    /// <summary>La nómina de un mes, donde la deja el estudio: en la carpeta del mes o en cualquiera de las que tiene adentro
+    /// (suele estar en «SUSS Y SIND»), menos en la de los firmados. Puede venir partida en varios PDF («NOMINA 1 07 2026»,
+    /// «NOMINA 2 07 2026»): se juntan. La usan la revisión de los clientes y Separar. «archivos»: los de la carpeta, si ya
+    /// se recorrió. Los avisos vuelven aparte, para quien los muestre.</summary>
+    public static async Task<(Nomina? Nomina, List<string> Avisos)> NominaDelMes(string carpetaMes, int mes, int anio, Ocr? ocr,
+        Action<string> avisar, CancellationToken corte, List<FileInfo>? archivos = null)
+    {
+        var avisos = new List<string>();
+        var firmados = Subcarpetas(carpetaMes).Where(EsDeFirmados).ToList();
+        Nomina? nomina = null;
+        foreach (var f in (archivos ?? Archivos(carpetaMes)).Where(f => EsNomina(f) && !Dentro(firmados, f)))
+        {
+            corte.ThrowIfCancellationRequested();
+            try
+            {
+                // shortcut: la nómina no pasa por la memoria y las escaneadas (las de julio y agosto) se leen
+                // con OCR cada vez; si revisar esos meses se vuelve habitual, guardarlas como las fotos.
+                var n = await Recibos.LeerNominaPdf(f.FullName, ocr, m =>
+                {
+                    if (m.StartsWith('⚠')) avisos.Add(m[2..]);
+                    else avisar(m);
+                });
+                if (n is null) continue;
+                if (n.Mes != mes || n.Anio != anio.ToString())
+                {
+                    avisos.Add($"{f.Name} es la nómina de {n.Mes:00}/{n.Anio}");
+                    continue;
+                }
+                var junta = nomina ??= new Nomina(f.FullName, mes, n.Anio, []);
+                junta.Empleados.AddRange(n.Empleados.Where(e => junta.Empleados.All(x => x.Cuil != e.Cuil)));
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                avisos.Add($"{f.Name}: {e.Message}");
+            }
+        }
+        return (nomina, avisos);
+    }
+
+    /// <summary>Cómo escriben a cada uno, por CUIL, los recibos sin firmar del mes, los que arma el estudio con texto: el
+    /// «APELLIDO NOMBRE» y el empleador, como en Renglon.Nombre. La nómina de AFIP a veces pone el nombre primero: Separar
+    /// nombra así lo que encontró con ella.</summary>
+    public static Dictionary<string, Hoja> RecibosSinFirmar(string carpetaMes, IReadOnlyList<Empleado> nomina)
+    {
+        var firmados = Subcarpetas(carpetaMes).Where(EsDeFirmados).ToList();
+        var recibos = new Dictionary<string, Hoja>();
+        foreach (var f in Archivos(carpetaMes).Where(f => EsPdf(f) && !EsNomina(f) && !Dentro(firmados, f)))
+            try
+            {
+                using var doc = PdfDocument.Open(f.FullName);
+                foreach (var p in doc.GetPages())
+                {
+                    var texto = string.Join(" ", p.GetWords().Select(w => w.Text));
+                    if (Recibo(p, texto) is { } h)
+                        foreach (var c in DeLaNomina(texto, nomina.Select(e => e.Cuil))) recibos.TryAdd(c, h);
+                }
+            }
+            catch { } // un PDF dañado o ajeno no frena: queda el nombre de la nómina
+        return recibos;
+    }
+
+    static bool Dentro(IEnumerable<string> carpetas, FileInfo f) =>
+        carpetas.Any(c => f.FullName.StartsWith(c + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+
     // El tipo y el DNI: los diez primeros dígitos del CUIL, sin el verificador.
     static string? Diez(string cuil) => cuil.Replace("-", "") is { Length: >= 10 } d ? d[..10] : null;
 
@@ -374,36 +457,10 @@ public static class Clientes
         var firmados = Subcarpetas(carpetaMes).Where(EsDeFirmados).ToList();
         // Si hay más de una, se escribe en la que nombra el mes («RECIBOS FIRMADOS OCTUBRE»).
         var destino = firmados.FirstOrDefault(c => Contiene(c, Meses[mes - 1])) ?? firmados.FirstOrDefault();
-        bool EnFirmados(FileInfo f) => firmados.Any(c => f.FullName.StartsWith(c + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        bool EnFirmados(FileInfo f) => Dentro(firmados, f);
 
-        // La nómina puede venir partida en varios PDF («NOMINA 1 07 2026», «NOMINA 2 07 2026»): se juntan.
-        Nomina? nomina = null;
-        foreach (var f in archivos.Where(f => EsNomina(f) && !EnFirmados(f)))
-        {
-            corte.ThrowIfCancellationRequested();
-            try
-            {
-                // shortcut: la nómina no pasa por la memoria y las escaneadas (las de julio y agosto) se leen
-                // con OCR cada vez; si revisar esos meses se vuelve habitual, guardarlas como las fotos.
-                var n = await Recibos.LeerNominaPdf(f.FullName, ocr, m =>
-                {
-                    if (m.StartsWith('⚠')) avisos.Add(m[2..]);
-                    else avisar($"{nombre}: {m}");
-                });
-                if (n is null) continue;
-                if (n.Mes != mes || n.Anio != anio.ToString())
-                {
-                    avisos.Add($"{f.Name} es la nómina de {n.Mes:00}/{n.Anio}");
-                    continue;
-                }
-                var junta = nomina ??= new Nomina(f.FullName, mes, n.Anio, []);
-                junta.Empleados.AddRange(n.Empleados.Where(e => junta.Empleados.All(x => x.Cuil != e.Cuil)));
-            }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                avisos.Add($"{f.Name}: {e.Message}");
-            }
-        }
+        var (nomina, deLaNomina) = await NominaDelMes(carpetaMes, mes, anio, ocr, m => avisar($"{nombre}: {m}"), corte, archivos);
+        avisos.AddRange(deLaNomina);
         if (nomina is null) return new(nombre, mes, anio, carpetaMes, null, destino, [], [], avisos);
 
         var empleados = nomina.Empleados;
@@ -443,7 +500,7 @@ public static class Clientes
                 // Una constancia de ARCA (alta, baja o modificación) nunca es un recibo, aunque traiga el CUIL: entre los
                 // firmados contaba como el firmado de esa persona, y una baja firmada tapaba que faltaba la liquidación
                 // final. La de una baja, además, dice que se fue y cuándo.
-                if (Normal(h.Lectura.Texto).Contains("CONSTANCIA DEL TRABAJADOR"))
+                if (EsConstancia(h.Lectura.Texto))
                 {
                     if (Regex.Match(Normal(h.Lectura.Texto), @"FECHA CESE:?\s*(\d{2}/\d{2}/\d{4})") is { Success: true } cese)
                         foreach (var c in cuils) bajas[c] = cese.Groups[1].Value;
@@ -461,19 +518,10 @@ public static class Clientes
                 // se buscaba por el nombre solo en las hojas sin nadie: en un escaneo de dos recibos por hoja, el CUIL de
                 // una empleada salió entero y el del otro no, la hoja quedó de ella y él figuraba sin firma aunque su
                 // nombre estaba en el texto. Los que se encuentran así quedan para revisar.
-                foreach (var otro in Nombrados(h.Lectura.Texto, empleados, cuils, empleador))
+                foreach (var otro in QuienesSinCuil(h.Lectura.Texto, f.FullName, e.Hojas.Count, empleados, cuils, empleador))
                 {
                     cuils.Add(otro.Cuil);
                     porNombre.Add((h, otro.Cuil));
-                }
-                // Lo último: el nombre del archivo. Las fotos se guardan con el del empleado («PEREZ JUAN RECIBO OCT
-                // 2026.jpeg»), y en octubre las que el OCR no leía eran justo esas. Solo en archivos de una hoja (un PDF
-                // con varios recibos se llama como uno solo, o como ninguno), y nunca en una baja, un alta o un DNI.
-                if (cuils.Count == 0 && e.Hojas.Count == 1 && !EsOtroDocumento(f.Name + " " + h.Lectura.Texto)
-                    && PorNombre(Path.GetFileNameWithoutExtension(f.Name), empleados) is { } q)
-                {
-                    cuils.Add(q.Cuil);
-                    porNombre.Add((h, q.Cuil));
                 }
                 // Lo que la app guardó encontrado por el nombre sigue así: ese CUIL lo puso ella, no se leyó. Hasta que
                 // aparezca en el texto (la lectura a fondo de la copia derecha puede leerlo).

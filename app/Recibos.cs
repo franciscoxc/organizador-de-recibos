@@ -178,10 +178,11 @@ public static class Recibos
 
     public static string Sufijo(Nomina n) => $" {n.Mes:00} {n.Anio}.pdf";
 
-    /// <summary>Cada empleado de la nómina con su recibo de ese período, o null si no está en ninguna carpeta.</summary>
-    public static List<(Empleado Empleado, string? Recibo)> Revisar(Nomina n, IEnumerable<string> carpetas)
+    /// <summary>Cada empleado de la nómina con su recibo de ese período, o null si no está en ninguna carpeta. PorNombre: ese
+    /// recibo lo separó la app encontrándolo por el nombre, porque su CUIL no se leía; hay que mirarlo.</summary>
+    public static List<(Empleado Empleado, string? Recibo, bool PorNombre)> Revisar(Nomina n, IEnumerable<string> carpetas)
     {
-        var recibos = new Dictionary<string, string>(); // CUIL -> archivo
+        var recibos = new Dictionary<string, (string Archivo, bool PorNombre)>(); // CUIL -> archivo
         foreach (var carpeta in carpetas.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
             foreach (var f in Directory.GetFiles(carpeta, "*.pdf"))
             {
@@ -191,20 +192,30 @@ public static class Recibos
                     // Un recibo ocupa una o dos hojas: los PDF más largos (el de todos juntos, o cualquier otro
                     // documento de la carpeta) no se leen, así revisar una carpeta como Descargas no tarda.
                     if (d.NumberOfPages > 3) continue;
-                    var texto = d.Information.Keywords + " " + string.Join(" ", d.GetPages().SelectMany(p => p.GetWords()).Select(w => w.Text));
+                    var hojas = string.Join(" ", d.GetPages().SelectMany(p => p.GetWords()).Select(w => w.Text));
+                    var texto = d.Information.Keywords + " " + hojas;
                     // Del período por el nombre que le pone la app o por el contenido, para los recibos que tienen
                     // otro nombre. Periodo descarta las fechas: la de pago del recibo de junio (05/07/2026) no
                     // lo vuelve de julio.
                     var delPeriodo = f.EndsWith(Sufijo(n), StringComparison.OrdinalIgnoreCase)
                         || Periodo.Matches(texto).Any(m => int.Parse(m.Groups[1].Value) == n.Mes && m.Groups[2].Value == n.Anio);
-                    var cs = Cuils(texto).ToHashSet();
+                    // De quién es: el que separó la app lo dice en sus palabras clave. Su hoja puede traer también el CUIL de
+                    // otro: en un escaneo de dos recibos por hoja, cada uno tiene la hoja entera, y por el texto el otro
+                    // quedaba con este archivo (en uno real de octubre 2026, tres salían faltando y uno, repetido).
+                    var claves = Cuils(d.Information.Keywords ?? "").ToHashSet();
+                    var cs = claves.Count > 0 ? claves : Cuils(texto).ToHashSet();
+                    // Como en Clientes: con la marca «por nombre», el CUIL que está en las palabras clave y no en la hoja lo
+                    // puso la app, no se leyó. Si otro archivo trae el suyo leído, vale ese.
+                    var supuestos = d.Information.Keywords?.Contains("por nombre") == true ? cs.Except(Cuils(hojas)).ToHashSet() : [];
                     // Un recibo separado tiene a lo sumo dos números: el CUIL del empleado y el CUIT del empleador.
                     // Uno con más es el PDF de todos juntos y no prueba que el recibo de cada uno se haya separado.
-                    if (delPeriodo && cs.Count <= 2) foreach (var c in cs) recibos.TryAdd(c, f);
+                    if (delPeriodo && cs.Count <= 2)
+                        foreach (var c in cs)
+                            if (!recibos.TryGetValue(c, out var ya) || ya.PorNombre && !supuestos.Contains(c)) recibos[c] = (f, supuestos.Contains(c));
                 }
                 catch { } // un PDF dañado o ajeno no frena la revisión
             }
-        return n.Empleados.Select(e => (e, recibos.GetValueOrDefault(e.Cuil))).ToList();
+        return n.Empleados.Select(e => recibos.TryGetValue(e.Cuil, out var r) ? (e, r.Archivo, r.PorNombre) : (e, (string?)null, false)).ToList();
     }
 
     public static string SinComa(string nombre) => Regex.Replace(nombre.Replace(",", " "), @"\s+", " ").Trim().ToUpperInvariant();
@@ -258,19 +269,26 @@ public static class Recibos
 
     /// <summary>Separa los recibos y lee las nóminas. Sin carpetaSalida, cada recibo va junto a su PDF de origen.
     /// Las iniciales en la firma son a pedido: son un parche para los recibos que vuelven sin firmar. Nunca pisa un
-    /// archivo: el recibo que ya estaba separado queda como está. «permiso» recibe lo que se va a escribir, antes de
-    /// escribir nada: si dice que no, no se guarda ninguno.</summary>
-    /// <summary>«permiso» recibe los recibos y los combinados que se van a escribir, y dice si se escriben.</summary>
+    /// archivo: el recibo que ya estaba separado queda como está. «permiso» recibe los recibos y los combinados que se van a
+    /// escribir, antes de escribir nada: si dice que no, no se guarda ninguno. «conocida» es la nómina que ya estaba cargada.
+    /// En Nominas vuelven las que vinieron en la tanda y las que encontró en la carpeta del mes.</summary>
     public static async Task<Resultado> Procesar(IEnumerable<string> pdfs, Ocr? ocr, Action<string> avisar, string? carpetaSalida = null,
-        bool iniciales = true, Func<IReadOnlyList<string>, IReadOnlyList<string>, Task<bool>>? permiso = null)
+        bool iniciales = true, Func<IReadOnlyList<string>, IReadOnlyList<string>, Task<bool>>? permiso = null, Nomina? conocida = null)
     {
-        // Por cada nombre, una lista: casi siempre de uno solo, y de dos si hay dos empleados que se llaman igual.
-        var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio), List<(List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils)>>();
+        // Por cada nombre, una lista: casi siempre de uno solo, y de dos si hay dos empleados que se llaman igual. PorNombre: los
+        // CUIL que no se leyeron en ninguna de sus hojas y se encontraron por el nombre; ese recibo queda para revisar.
+        var grupos = new Dictionary<(string Carpeta, string Empleador, string Nombre, int Mes, string Anio),
+            List<(List<(PdfDocument Doc, int Hoja, Palabra? Firma)> Hojas, HashSet<string> Cuils, HashSet<string> PorNombre)>>();
         var docs = new List<PdfDocument>();
         var creados = new List<string>();
         var yaEstaban = new List<string>();
         var nominas = new List<Nomina>();
+        var halladas = new List<Nomina>();
         var hechos = new List<string>();
+        // Las hojas que se leyeron como recibo, y las que no (sin el rótulo del nombre o sin el período): esas todavía pueden
+        // ser de alguien de la nómina, y se ven cuando ya se sabe cuál es.
+        var leidas = new List<(PdfDocument Doc, string Ruta, int Numero, string Carpeta, Hoja Recibo, string Texto)>();
+        var sinLeer = new List<(PdfDocument Doc, string Ruta, int Numero, string Carpeta, string Texto, string Error)>();
         // Las hojas de un empleado, como en su archivo: con sus iniciales si se eligió estamparlas.
         void Copiar(PdfDocumentBuilder b, PdfDocumentBuilder.AddedFont? fuente, string nombre, List<(PdfDocument Doc, int Hoja, Palabra? Firma)> hojas,
             Action<PdfPageBuilder>? ademas = null, bool avisarSinFirma = true)
@@ -286,12 +304,35 @@ public static class Recibos
                 ademas?.Invoke(p);
             }
         }
+        // Dos empleados con el mismo nombre (un padre y su hijo) no son el mismo: antes salían juntos en un solo PDF. Los
+        // distingue el CUIL. La hoja va con el último del mismo nombre cuyos números no contradicen los suyos: una segunda hoja
+        // con un número mal leído, o sin ninguno, sigue con la primera; otra con el mismo CUIT del empleador y otro CUIL es de
+        // otra persona.
+        void Agregar((string, string, string, int, string) clave, (PdfDocument, int, Palabra?) hoja, IReadOnlyCollection<string> leidos,
+            IReadOnlyCollection<string> porNombre)
+        {
+            var cuils = leidos.Concat(porNombre).ToHashSet();
+            if (!grupos.TryGetValue(clave, out var tocayos)) grupos[clave] = tocayos = [];
+            var i = tocayos.FindLastIndex(t => t.Cuils.IsSubsetOf(cuils) || cuils.IsSubsetOf(t.Cuils));
+            if (i < 0)
+            {
+                tocayos.Add(([], [], []));
+                i = tocayos.Count - 1;
+            }
+            var (hojas, todos, supuestos) = tocayos[i];
+            hojas.Add(hoja);
+            // Lo que se leyó en alguna de sus hojas ya no es una suposición.
+            supuestos.UnionWith(porNombre.Where(c => !todos.Contains(c)));
+            supuestos.ExceptWith(leidos);
+            todos.UnionWith(cuils);
+        }
         try
         {
             foreach (var ruta in pdfs)
             {
                 var doc = PdfDocument.Open(ruta);
                 docs.Add(doc);
+                var carpeta = carpetaSalida ?? Path.GetDirectoryName(Path.GetFullPath(ruta))!;
                 Nomina? nomina = null;
                 foreach (var page in doc.GetPages())
                 {
@@ -306,23 +347,9 @@ public static class Recibos
                             n.Empleados.AddRange(empleados.Where(e => n.Empleados.All(x => x.Cuil != e.Cuil)));
                             continue;
                         }
-
-                        var h = LeerHoja(ws, page.Width);
-                        var clave = (carpetaSalida ?? Path.GetDirectoryName(Path.GetFullPath(ruta))!, h.Empleador, h.Nombre, h.Mes, h.Anio);
-                        var cuils = Cuils(string.Join(" ", ws.Select(w => w.Texto))).ToHashSet();
-                        if (!grupos.TryGetValue(clave, out var tocayos)) grupos[clave] = tocayos = [];
-                        // Dos empleados con el mismo nombre (un padre y su hijo) no son el mismo: antes salían juntos en un
-                        // solo PDF. Los distingue el CUIL. La hoja va con el último del mismo nombre cuyos números no
-                        // contradicen los suyos: una segunda hoja con un número mal leído, o sin ninguno, sigue con la
-                        // primera; otra con el mismo CUIT del empleador y otro CUIL es de otra persona.
-                        var i = tocayos.FindLastIndex(t => t.Cuils.IsSubsetOf(cuils) || cuils.IsSubsetOf(t.Cuils));
-                        if (i < 0)
-                        {
-                            tocayos.Add(([], []));
-                            i = tocayos.Count - 1;
-                        }
-                        tocayos[i].Hojas.Add((doc, page.Number, h.Firma));
-                        tocayos[i].Cuils.UnionWith(cuils);
+                        var texto = string.Join(" ", ws.Select(w => w.Texto));
+                        try { leidas.Add((doc, ruta, page.Number, carpeta, LeerHoja(ws, page.Width), texto)); }
+                        catch (FormatException e) { sinLeer.Add((doc, ruta, page.Number, carpeta, texto, e.Message)); }
                     }
                     catch (Exception e) when (e is not OperationCanceledException)
                     {
@@ -332,11 +359,104 @@ public static class Recibos
                 if (nomina is not null) nominas.Add(nomina);
             }
 
+            // La nómina de cada hoja, para encontrar a quien la hoja no nombra bien: la que vino en la tanda; si no, la que ya
+            // estaba cargada, si trae a alguien de estos recibos (la de otro cliente del mismo mes no sirve); y si no, la de la
+            // carpeta del mes del PDF, como la busca Clientes.
+            var textos = leidas.Select(l => l.Texto).Concat(sinLeer.Select(s => s.Texto)).ToList();
+            var conocidaSirve = conocida is not null && textos.Any(t => Clientes.DeLaNomina(t, conocida.Empleados.Select(e => e.Cuil)).Count > 0);
+            var delMes = new Dictionary<(string Carpeta, int Mes, string Anio), Nomina?>();
+            async Task<IReadOnlyList<Empleado>?> NominaDe(string ruta, (int Mes, string Anio) p)
+            {
+                var traidas = nominas.Where(n => (n.Mes, n.Anio) == p).ToList();
+                if (traidas.Count > 0) return traidas.SelectMany(n => n.Empleados).DistinctBy(e => e.Cuil).ToList();
+                if (conocidaSirve && (conocida!.Mes, conocida.Anio) == p) return conocida.Empleados;
+                if (CarpetaDelMes(ruta, p) is not { } carpeta) return null;
+                if (!delMes.TryGetValue((carpeta, p.Mes, p.Anio), out var hallada))
+                {
+                    (hallada, var avisos) = await Clientes.NominaDelMes(carpeta, p.Mes, int.Parse(p.Anio), ocr, avisar, CancellationToken.None);
+                    delMes[(carpeta, p.Mes, p.Anio)] = hallada;
+                    if (hallada is not null)
+                    {
+                        halladas.Add(hallada);
+                        foreach (var a in avisos) avisar($"⚠ {a}");
+                    }
+                }
+                return hallada?.Empleados;
+            }
+            // Cómo escriben a cada uno los recibos sin firmar de la carpeta del mes, leídos una vez por carpeta.
+            var sinFirmar = new Dictionary<string, Dictionary<string, Hoja>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, Hoja> RecibosDe(string ruta, (int Mes, string Anio) p, IReadOnlyList<Empleado> nomina)
+            {
+                if (CarpetaDelMes(ruta, p) is not { } carpeta) return [];
+                if (!sinFirmar.TryGetValue(carpeta, out var hs)) sinFirmar[carpeta] = hs = Clientes.RecibosSinFirmar(carpeta, nomina);
+                return hs;
+            }
+
+            foreach (var (doc, ruta, numero, carpeta, recibo, texto) in leidas)
+            {
+                var leidos = Cuils(texto).ToHashSet();
+                List<string> porNombre = [];
+                if (await NominaDe(ruta, (recibo.Mes, recibo.Anio)) is { } nomina)
+                {
+                    // El CUIL como lo haya leído el OCR (sin guiones, con puntos, una O por un cero), como en Clientes.
+                    var porCuil = Clientes.DeLaNomina(texto, nomina.Select(e => e.Cuil));
+                    leidos.UnionWith(porCuil);
+                    // Si no está, el nombre del recibo. Solo si no se leyó su CUIL: con dos números (el suyo y el del empleador)
+                    // es alguien que no está en la nómina, y el que en ella se llama casi igual no es él.
+                    if (porCuil.Count == 0 && leidos.Count < 2
+                        && (Clientes.Nombrados(recibo.Nombre, nomina, [], "") is [var quien] ? quien : Clientes.PorCuilParecido(texto, nomina)) is { } q)
+                        porNombre.Add(q.Cuil);
+                }
+                Agregar((carpeta, recibo.Empleador, recibo.Nombre, recibo.Mes, recibo.Anio), (doc, numero, recibo.Firma), leidos, porNombre);
+            }
+
+            foreach (var (doc, ruta, numero, carpeta, texto, error) in sinLeer)
+            {
+                // El período, de las otras hojas del mismo PDF. Si no se leyó ninguna, el de la hoja misma, y si tampoco se lee,
+                // el de la carpeta del mes donde está, como en Clientes.
+                var hermana = leidas.FirstOrDefault(l => l.Doc == doc).Recibo;
+                IReadOnlyList<Empleado>? nomina = null;
+                (int Mes, string Anio) periodo = default;
+                foreach (var p in hermana is null ? Periodos(texto).Concat(MesesArriba(ruta).Take(1).Select(x => (x.Mes, x.Anio))) : [(hermana.Mes, hermana.Anio)])
+                    if ((nomina = await NominaDe(ruta, p)) is not null)
+                    {
+                        periodo = p;
+                        break;
+                    }
+                var quienes = new List<(Empleado Empleado, bool PorNombre)>();
+                if (nomina is not null && !Clientes.EsConstancia(texto))
+                {
+                    // El empleador, como en las otras hojas; si no hay ninguna, como en los recibos sin firmar del mes. Y cada uno con
+                    // su nombre como lo escribe su recibo: la nómina de AFIP a veces pone el nombre primero.
+                    var comoEscriben = RecibosDe(ruta, periodo, nomina);
+                    var empleador = hermana?.Empleador
+                        ?? leidas.FirstOrDefault(l => l.Carpeta == carpeta && (l.Recibo.Mes, l.Recibo.Anio) == periodo).Recibo?.Empleador
+                        ?? comoEscriben.Values.FirstOrDefault()?.Empleador ?? "EMPLEADOR";
+                    var porCuil = Clientes.DeLaNomina(texto, nomina.Select(e => e.Cuil));
+                    quienes.AddRange(nomina.Where(e => porCuil.Contains(e.Cuil)).Select(e => (e, false)));
+                    // Una hoja puede traer dos recibos, escaneados de a dos: la tiene cada uno.
+                    quienes.AddRange(Clientes.QuienesSinCuil(texto, ruta, doc.NumberOfPages, nomina, porCuil, empleador).Select(e => (e, true)));
+                    foreach (var (e, supuesto) in quienes)
+                    {
+                        // Con el que ya tiene su recibo en esta tanda (es otra hoja suya); si no, con su nombre.
+                        var clave = grupos.Where(g => g.Key.Carpeta == carpeta && (g.Key.Mes, g.Key.Anio) == periodo && g.Value.Any(t => t.Cuils.Contains(e.Cuil)))
+                            .Select(g => ((string, string, string, int, string)?)g.Key).FirstOrDefault()
+                            ?? (carpeta, empleador, SinComa(comoEscriben.GetValueOrDefault(e.Cuil)?.Nombre ?? e.Nombre), periodo.Mes, periodo.Anio);
+                        string[] suyo = [e.Cuil];
+                        Agregar(clave, (doc, numero, null), supuesto ? [] : suyo, supuesto ? suyo : []);
+                    }
+                }
+                if (quienes.Count == 0) avisar($"⚠ {Path.GetFileName(ruta)}, hoja {numero}: {error}");
+            }
+            // Las hojas de cada uno como vinieron: la que se encontró recién con la nómina puede ser la primera de su recibo.
+            foreach (var t in grupos.Values.SelectMany(x => x))
+                t.Hojas.Sort((a, b) => (docs.IndexOf(a.Doc), a.Hoja).CompareTo((docs.IndexOf(b.Doc), b.Hoja)));
+
             // Primero, qué archivo le toca a cada uno; se escribe después, cuando ya se sabe todo lo que hay para guardar
             // y se pudo preguntar.
             var pendientes = new List<(string Ruta, Func<Task> Escribir)>();
             foreach (var ((carpeta, empleador, nombre, mes, anio), tocayos) in grupos)
-                foreach (var (hojas, cuils) in tocayos)
+                foreach (var (hojas, cuils, porNombre) in tocayos)
                 {
                     // Con un tocayo, el archivo lleva además su CUIL: de sus números, el que no tiene el otro (el CUIT
                     // del empleador lo tienen los dos).
@@ -353,8 +473,10 @@ public static class Recibos
                         var builder = new PdfDocumentBuilder();
                         // El CUIL y el período van también en las palabras clave: un recibo escaneado no tiene texto,
                         // y la revisión de la nómina los busca ahí. «iniciales» marca los que llevan las del estudio:
-                        // la revisión de clientes no los cuenta como firmados por el empleado.
-                        builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "");
+                        // la revisión de clientes no los cuenta como firmados por el empleado. «por nombre», los que se
+                        // encontraron por el nombre: las dos revisiones los muestran para mirar, como hace Clientes con los suyos.
+                        builder.DocumentInformation.Keywords = string.Join(" ", cuils) + $" {mes:00}/{anio}" + (iniciales ? " iniciales" : "")
+                            + (porNombre.Count > 0 ? " por nombre" : "");
                         Copiar(builder, iniciales ? builder.AddTrueTypeFont(Manuscrita.Value) : null, nombre, hojas);
                         Directory.CreateDirectory(destino);
                         await GuardarNuevo(salida, builder.Build());
@@ -385,7 +507,7 @@ public static class Recibos
                         avisar($"⚠ {Path.GetFileName(ruta)}: no lo pude abrir, así que no lo completé ({e.Message})");
                         continue;
                     }
-                var faltan = g.SelectMany(kv => kv.Value.Select(t => (kv.Key.Nombre, t.Hojas, t.Cuils)))
+                var faltan = g.SelectMany(kv => kv.Value.Select(t => (kv.Key.Nombre, t.Hojas, t.Cuils, t.PorNombre)))
                     .Where(t => estan is null || !t.Cuils.IsSubsetOf(estan))
                     .OrderBy(t => docs.IndexOf(t.Hojas[0].Doc)).ThenBy(t => t.Hojas[0].Hoja).ToList();
                 if (faltan.Count == 0) continue;
@@ -399,9 +521,16 @@ public static class Recibos
                     Directory.CreateDirectory(destino);
                     await Juntar(ruta, b, null, () =>
                     {
-                        foreach (var (nombre, hojas, cuils) in faltan)
-                            Copiar(b, fuente, nombre, hojas, p => Invisible(p, letra, string.Join(" ", cuils.Select(c => "CUIL " + c))), avisarSinFirma: false);
-                        return Task.FromResult(faltan.Sum(t => t.Hojas.Count));
+                        // Quién está en cada hoja; los encontrados por el nombre, con «POR NOMBRE», como en el consolidado. Una hoja
+                        // con dos recibos va una sola vez, con los dos.
+                        var quienes = faltan.SelectMany(t => t.Hojas.Select(h => (Clave: (h.Doc, h.Hoja),
+                                Texto: string.Join(" ", t.Cuils.Select(c => $"{(t.PorNombre.Contains(c) ? "POR NOMBRE" : "CUIL")} {c}")))))
+                            .GroupBy(x => x.Clave).ToDictionary(k => k.Key, k => string.Join(" ", k.Select(x => x.Texto).Distinct()));
+                        var puestas = new HashSet<(PdfDocument, int)>();
+                        foreach (var (nombre, hojas, _, _) in faltan)
+                            foreach (var h in hojas.Where(x => puestas.Add((x.Doc, x.Hoja))))
+                                Copiar(b, fuente, nombre, [h], p => Invisible(p, letra, quienes[(h.Doc, h.Hoja)]), avisarSinFirma: false);
+                        return Task.FromResult(puestas.Count);
                     });
                     hechos.Add(ruta);
                     avisar($"▤ {Path.GetFileName(destino)}\\{Path.GetFileName(ruta)}");
@@ -421,8 +550,29 @@ public static class Recibos
         {
             foreach (var d in docs) d.Dispose();
         }
-        return new Resultado(creados, nominas, yaEstaban, hechos);
+        return new Resultado(creados, [.. nominas, .. halladas], yaEstaban, hechos);
     }
+
+    static IEnumerable<(int Mes, string Anio)> Periodos(string texto) =>
+        Periodo.Matches(texto).Select(m => (int.Parse(m.Groups[1].Value), m.Groups[2].Value));
+
+    // Las carpetas de un mes que tienen adentro al PDF, como las de los clientes («PEREZ SUELDOS OCTUBRE 2026», «10 2026»), con
+    // su mes, de la más cercana para arriba. La de los firmados no cuenta aunque lo nombre («RECIBOS FIRMADOS 10 2026»): la
+    // nómina y los recibos sin firmar están en la de arriba. El año, sin mirar lo que sigue: hay una carpeta real que dice 20266.
+    static IEnumerable<(string Carpeta, int Mes, string Anio)> MesesArriba(string ruta)
+    {
+        for (var c = Path.GetDirectoryName(Path.GetFullPath(ruta)); !string.IsNullOrEmpty(c); c = Path.GetDirectoryName(c))
+        {
+            var nombre = Path.GetFileName(c);
+            if (Clientes.EsDeFirmados(c)) continue;
+            foreach (var anio in Regex.Matches(nombre, @"(?<!\d)(?:19|20)\d{2}").Select(m => int.Parse(m.Value)).Distinct())
+                for (var mes = 1; mes <= 12; mes++)
+                    if (Clientes.EsDelMes(nombre, mes, anio)) yield return (c, mes, anio.ToString());
+        }
+    }
+
+    static string? CarpetaDelMes(string ruta, (int Mes, string Anio) p) =>
+        MesesArriba(ruta).Where(x => (x.Mes, x.Anio) == p).Select(x => x.Carpeta).FirstOrDefault();
 
     /// <summary>Un PDF que junta recibos: nuevo, o el que ya estaba con lo que le falta al final. Las hojas que tenía quedan
     /// como estaban (cada una pasa por «vieja», por si hay que escribirle quién está). «agregar» suma lo nuevo al final y dice

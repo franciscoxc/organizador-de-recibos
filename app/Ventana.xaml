@@ -52,7 +52,7 @@
     </Window.Resources>
 
     <Grid>
-        <StackPanel Margin="20,10,20,20">
+        <StackPanel x:Name="todo" Margin="20,10,20,20">
             <Grid>
             <!-- Arriba a la izquierda, las dos tareas: la pastilla viaja de una a la otra y la vista nueva entra
                  por su lado. «Clientes» y no «Revisar clientes»: con la flecha estirada en «Reiniciar para
@@ -127,7 +127,8 @@
                         <TranslateTransform x:Name="tarjetaCorrida"/>
                     </TransformGroup>
                 </Button.RenderTransform>
-                <Grid MinHeight="236">
+                <!-- Lo justo para el ícono y el título: con la revisión abajo, cada renglón que entra cuenta. -->
+                <Grid MinHeight="180">
                     <Border CornerRadius="12" Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"/>
                     <!-- Un resplandor del amarillo de la carpeta detrás del ícono: le da calor en los dos modos. -->
                     <Ellipse Width="260" Height="180" VerticalAlignment="Top" Margin="0,4,0,0" IsHitTestVisible="False">
@@ -156,9 +157,6 @@
                                    FontFamily="{StaticResource Titulos}" FontSize="19" FontWeight="SemiBold"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                    Text="Soltá acá los recibos o la nómina"/>
-                        <TextBlock x:Name="tarjetaDetalle" Margin="6,4,6,0" TextAlignment="Center" TextWrapping="Wrap" FontSize="13"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   Text="Un PDF por empleado y mes, con sus iniciales en la firma, y uno con todos juntos. O hacé clic para buscarlos."/>
                         <TextBlock x:Name="estado" Margin="0,10,0,0" TextAlignment="Center" FontSize="12"
                                    TextTrimming="CharacterEllipsis" Visibility="Collapsed"
                                    Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>

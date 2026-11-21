@@ -207,9 +207,7 @@ public partial class Ventana
                 }
             }
             catch { } // si no se puede recordar, vale para esta vez
-            DetalleTarjeta();
         };
-        DetalleTarjeta();
 
         // Los resortes arrancan donde está cada cosa: así el primer cambio ya sale desde ahí.
         Loaded += (_, _) =>
@@ -289,10 +287,6 @@ public partial class Ventana
         Opacidad(clientesIcono, 0);
         Resorte.Animar((clientesIcono, "escala"), 0.85, v => clientesIconoEscala.ScaleX = clientesIconoEscala.ScaleY = v, rigidez: 300);
     }
-
-    void DetalleTarjeta() => tarjetaDetalle.Text = estampar.IsChecked == true
-        ? "Un PDF por empleado y mes, con sus iniciales en la firma, y uno con todos juntos. O hacé clic para buscarlos."
-        : "Un PDF por empleado y mes, y uno con todos juntos. O hacé clic para buscarlos.";
 
     // ---- Las dos vistas ----
 
@@ -1493,8 +1487,9 @@ public partial class Ventana
         return grilla;
     }
 
-    // Las hojas de un archivo, derechas como las leyó el OCR (a lo sumo tres). Tocar una la abre en tamaño completo.
-    static Func<Task<List<UIElement>>>? Hojas(IReadOnlyList<Hallazgo>? hojas, string? leyenda = null)
+    // Las hojas de un archivo, derechas como las leyó el OCR (a lo sumo tres). Tocar una la abre en tamaño completo. Separar
+    // también las usa, con un alto tope: su lista es angosta y una hoja entera no entraba.
+    static Func<Task<List<UIElement>>>? Hojas(IReadOnlyList<Hallazgo>? hojas, string? leyenda = null, double maxAlto = double.PositiveInfinity)
     {
         if (hojas is not { Count: > 0 }) return null;
         return async () =>
@@ -1504,7 +1499,7 @@ public partial class Ventana
             foreach (var h in hojas.Take(3))
             {
                 var hoja = h;
-                lista.Add(Imagen(await Task.Run(() => Previa(hoja)), () => AbrirHoja(hoja)));
+                lista.Add(Imagen(await Task.Run(() => Previa(hoja)), () => AbrirHoja(hoja), maxAlto));
             }
             if (hojas.Count > 3) lista.Add(Nota($"Y {hojas.Count - 3} hojas más: tocá una para abrir el archivo."));
             return lista;

@@ -59,8 +59,18 @@ revisa que cada empleado tenga su recibo de ese mes. La ventana se estira y
 muestra un ✓ o una ✗ por empleado, primero los que faltan, y abajo `TODOS OK` o
 cuántos recibos faltan.
 
+- Si los recibos están en la carpeta del mes de un cliente, no hace falta tirar
+  la nómina: la busca ahí, como la pestaña Clientes (en esa carpeta y en las que
+  tiene adentro, menos la de los firmados).
 - Cruza por CUIL, no por nombre: la nómina y los recibos escriben los nombres
   distinto, y el dígito verificador descarta los números mal leídos.
+- Con la nómina, también encuentra al que la hoja de un escaneo no nombra bien:
+  por el CUIL como lo haya leído el OCR, por el nombre o por un CUIL casi igual.
+  Su recibo se guarda con el nombre como lo escribe su recibo sin firmar. El
+  encontrado solo por el nombre lleva una marca adentro y en la revisión dice
+  «encontrado por el nombre: ilegible, revisar», como en la pestaña Clientes.
+- Al tocar a alguien que tiene su recibo, se abre ahí mismo con su hoja, como en
+  la pestaña Clientes; tocar la hoja la abre entera.
 - Busca los recibos en la carpeta de la nómina, en las carpetas que tiene
   adentro (ahí está la del empleador) y en las carpetas donde exportó hace poco,
   aunque la app se haya cerrado en el medio.
