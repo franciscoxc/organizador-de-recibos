@@ -45,10 +45,16 @@ public partial class Ventana
     Memoria? memoria;
     (int Mes, int Anio) memoriaDe; // el mes de esa memoria
     LeerImagen? lector, lectorAFondo; // la lectura rápida, para todo, y a fondo, para las hojas difíciles
+    // Con el OCR va la huella de cada imagen: la misma foto en dos archivos se lee una sola vez.
+    SacarHuella? Huella => lector is null ? null : WindowsOcr.Huella;
     string? raizElegida, raizActual;
     readonly Dictionary<string, FilaCliente> porCliente = new(StringComparer.OrdinalIgnoreCase);
     // «carpeta del cliente|CUIL» de los que el usuario eligió para estamparles las iniciales. Nada viene marcado.
     readonly HashSet<string> elegidos = [];
+    // Los clientes (su carpeta) cuyos recibos de otro mes el usuario pidió llevar a su mes. Tampoco viene marcado.
+    readonly HashSet<string> aSuMes = new(StringComparer.OrdinalIgnoreCase);
+    // El renglón de cada recibo que se lleva a su mes, por la ruta adonde va: ahí acusa recibo al guardarse.
+    readonly Dictionary<string, (TextBlock Marca, TextBlock Texto)> lineasOtroMes = new(StringComparer.OrdinalIgnoreCase);
     // Los clientes ocultos del mes, por el nombre de su carpeta: no se leen ni cuentan. Van en un archivo por mes, al lado
     // de la memoria de lecturas pero aparte: esa se borra para releer todo con el OCR, y la lista no se tiene que ir con ella.
     readonly HashSet<string> ocultos = new(StringComparer.OrdinalIgnoreCase);
@@ -94,6 +100,7 @@ public partial class Ventana
         public required FrameworkElement Ruedita;
         public required RotateTransform RueditaGiro;
         public int Dificiles; // hojas difíciles que todavía no se leyeron a fondo
+        public int PorLeer; // fotos y hojas escaneadas que esperan su turno con el OCR: hasta entonces no hay revisión
         public required TranslateTransform Corrida, ChevronCorrida;
         public required int Orden;
         public Revision? Revision;
@@ -505,6 +512,7 @@ public partial class Ventana
         PintarOjoBarra(animar: false);
         MostrarIcono();
         elegidos.Clear();
+        aSuMes.Clear();
         Opacidad(clientesCartel, 0);
         guardar.IsEnabled = false;
         sinRaiz.Visibility = Visibility.Collapsed;
@@ -555,14 +563,49 @@ public partial class Ventana
             porRevisar.UnionWith(clientes);
             PintarOjoBarra(animar: false);
             Acomodar();
-            var leidos = 0;
+            // El carril rápido: primero todos sin OCR, que es un instante por cliente. Lo que ya está leído, o no hay que
+            // leer, aparece enseguida; los que tienen fotos o escaneos nuevos dicen cuántas hojas y esperan su turno.
+            // ponytail-keep: antes cada cliente esperaba al OCR de todos los de arriba. Medido con las muestras, uno sin
+            // nada para leer, que se revisa en 0,05 s, aparecía a los 169 s por estar detrás de dos con fotos.
+            // Sin el turno de lectura: no usa el OCR, y así no espera a la hoja que quedó leyéndose de la revisión anterior
+            // (al cambiar de mes esa lectura no se corta: termina sola).
+            var conFotos = new List<FilaCliente>();
+            var vistos = 0;
             foreach (var ruta in clientes)
             {
                 corte.ThrowIfCancellationRequested();
                 var fila = porCliente[ruta];
                 porRevisar.Remove(ruta);
                 if (EsOculto(fila)) continue; // oculto: no se lee
-                EstadoClientes($"{++leidos} de {clientes.Count(c => !ocultos.Contains(Path.GetFileName(c)))} · {fila.Nombre}");
+                EstadoClientes($"{++vistos} de {clientes.Count(c => !ocultos.Contains(Path.GetFileName(c)))} · {fila.Nombre}");
+                leyendo = fila;
+                var rapida = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, null, mem, _ => { }, corte), corte);
+                if (g != generacionClientes) return;
+                leyendo = null;
+                // Sin OCR en esta PC no hay segunda pasada: lo que se pudo revisar es esto.
+                if (lector is null || rapida.PorLeer == 0) ResolverCliente(fila, rapida);
+                else
+                {
+                    EnEspera(fila, rapida.PorLeer);
+                    conFotos.Add(fila);
+                }
+            }
+            if (vistos > 0) _ = Task.Run(mem.Guardar);
+
+            // Las fotos y los escaneos: de a un cliente, en orden, con el OCR.
+            foreach (var (fila, i) in conFotos.Select((f, i) => (f, i)))
+            {
+                corte.ThrowIfCancellationRequested();
+                if (fila.Revision is not null) continue;
+                if (EsOculto(fila))
+                {
+                    // Se ocultó mientras esperaba: deja de esperar este turno. Si lo vuelven a mostrar, lo lee
+                    // LeerLosQueVolvieron, que saltea a los que todavía tienen turno acá.
+                    fila.PorLeer = 0;
+                    continue;
+                }
+                var ruta = fila.Ruta;
+                EstadoClientes($"Fotos y escaneos: {i + 1} de {conFotos.Count} clientes · {fila.Nombre}");
                 await turnoLectura.WaitAsync(corte);
                 try
                 {
@@ -576,7 +619,7 @@ public partial class Ventana
                             EstadoClientes(msg);
                             // En su panel, si está abierto, sin el nombre del cliente adelante: ya es el título.
                             if (elegida == fila && fila.Revision is null && progresoCliente is { } t) t.Text = $"Leyendo {msg[(msg.IndexOf(": ") + 2)..]}";
-                        }), corte), corte);
+                        }), corte, Huella), corte);
                     if (g != generacionClientes) return;
                     leyendo = null;
                     Rueda(fila, false);
@@ -606,8 +649,8 @@ public partial class Ventana
                 {
                     Rueda(fila, true);
                     await Task.Run(() => Clientes.Profundizar(antes, lectorAFondo!, mem,
-                        msg => Dispatcher.InvokeAsync(() => { if (g == generacionClientes) EstadoClientes($"Hojas difíciles · {antes.Cliente}: {msg}"); }), corte), corte);
-                    var r = await Task.Run(() => Clientes.Revisar(fila.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                        msg => Dispatcher.InvokeAsync(() => { if (g == generacionClientes) EstadoClientes($"Hojas difíciles · {antes.Cliente}: {msg}"); }), corte, Huella), corte);
+                    var r = await Task.Run(() => Clientes.Revisar(fila.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte, Huella), corte);
                     if (g != generacionClientes) return;
                     Rueda(fila, false);
                     ResolverCliente(fila, r);
@@ -856,7 +899,9 @@ public partial class Ventana
         // Lo último que se está leyendo de él ya está en la línea de arriba de la lista: se empieza por eso.
         var nombre = Path.GetFileName(f.Ruta);
         var ahora = clientesEstado.Text.StartsWith(nombre + ": ") ? $"Leyendo {clientesEstado.Text[(nombre.Length + 2)..]}" : "Leyendo…";
-        var t = progresoCliente = Nota(f == leyendo ? ahora : "Todavía no lo leí: van en orden, y le toca después de los de arriba.");
+        var t = progresoCliente = Nota(f == leyendo ? ahora
+            : f.PorLeer > 0 ? $"{(f.PorLeer == 1 ? "Le queda 1 hoja" : $"Le quedan {f.PorLeer} hojas")} por leer, entre fotos y escaneos: se leen de a un cliente, en orden."
+            : "Todavía no lo leí: van en orden, y le toca después de los de arriba.");
         Llenar(nombre, TextoMes(), null, lista => lista.Add(t));
         pieGuardar.Visibility = Visibility.Collapsed;
         pieCliente.Visibility = Visibility.Collapsed;
@@ -928,9 +973,22 @@ public partial class Ventana
         Opacidad(f.Tarjeta, 1);
     }
 
+    // El que tiene fotos o escaneos sin leer lo dice y espera su turno, con el disco azul de «todavía sin leer»: lo que
+    // se sabe de él sin esas hojas no se muestra, porque lo que falta puede estar justo ahí.
+    void EnEspera(FilaCliente f, int hojas)
+    {
+        f.PorLeer = hojas;
+        f.Detalle.Text = hojas == 1 ? "1 hoja por leer" : $"{hojas} hojas por leer";
+        f.Detalle.ToolTip = null;
+        f.Detalle.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+        AutomationProperties.SetName(f.Boton, $"{f.Nombre}: {f.Detalle.Text}");
+        if (elegida == f && muestra == Muestra.Cliente) MostrarLeyendo(f);
+    }
+
     void ResolverCliente(FilaCliente f, Revision r)
     {
         f.Revision = r;
+        f.PorLeer = 0;
         f.Dificiles = lectorAFondo is null ? 0 : Clientes.Dificiles(r).Count;
         var (glifo, color, texto, grupo) = Resumen(r);
         f.Grupo = grupo;
@@ -981,6 +1039,11 @@ public partial class Ventana
         if (recibos > 0) partes.Add(recibos == 1 ? "falta 1 recibo" : $"faltan {recibos} recibos");
         if (r.Firmados is null) partes.Add("sin firmados todavía");
         else if (firmas > 0) partes.Add(partes.Count > 0 ? (firmas == 1 ? "1 firma" : $"{firmas} firmas") : firmas == 1 ? "falta 1 firma" : $"faltan {firmas} firmas");
+        // Los recibos de otro mes que están entre los firmados: no cuentan, y se dice de qué mes son. Antes que lo demás:
+        // al final, en un renglón con varias cosas («faltan 8 firmas · 1 sin identificar · 2 ilegibles…») quedaba cortado.
+        // Los que ya están en su carpeta no cuentan: eso ya se resolvió.
+        if (DeQueMeses(r.DeOtroMesPendientes) is { } ajenos) partes.Add(r.DeOtroMesPendientes.Select(o => o.Hoja.Ruta).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1
+            ? $"hay un recibo de {ajenos}" : $"hay recibos de {ajenos}");
         if (sinLeer > 0) partes.Add($"{sinLeer} sin identificar");
         if (mirar > 0) partes.Add(mirar == 1 ? "1 ilegible, revisar" : $"{mirar} ilegibles, revisar");
         var texto = string.Join(" · ", partes);
@@ -988,7 +1051,17 @@ public partial class Ventana
         if (r.Firmados is null) return (Reloj, Amarillo, texto, 1);
         if (firmas > 0) return (Lapiz, Amarillo, texto, 1);
         var todos = $"{r.Renglones.Count} de {r.Renglones.Count}";
+        // Están todos, pero hay recibos de otro mes en la carpeta: no es un «todo bien», hay algo para acomodar.
+        if (r.DeOtroMesPendientes.Any()) return (Alerta, Amarillo, $"{todos} · {texto}", 1);
         return (Tilde, Verde, partes.Count > 0 ? $"{todos} · {texto}" : todos, 2);
+    }
+
+    // «septiembre», «septiembre y agosto» u «otros meses»: de cuáles son los recibos que no son del mes. null si no hay.
+    static string? DeQueMeses(IEnumerable<DeOtroMes> otros, string? cuil = null)
+    {
+        var meses = otros.Where(o => cuil is null || o.Cuils.Contains(cuil)).Select(o => o.Mes).Distinct().Order()
+            .Select(m => Clientes.NombreMes(m).ToLowerInvariant()).ToList();
+        return meses.Count switch { 0 => null, 1 => meses[0], 2 => $"{meses[0]} y {meses[1]}", _ => "otros meses" };
     }
 
     // Falta el recibo del todo: ni el firmado ni el sin firmar. Si está el sin firmar, lo que falta es la firma.
@@ -1003,6 +1076,7 @@ public partial class Ventana
         var seccion = paraGuardar = new StackPanel();
         ranuras.Clear();
         iconosPlan.Clear();
+        lineasOtroMes.Clear();
         Llenar($"{r.Cliente}", $"{TextoMes()} · {Resumen(r).Texto}", null, lista =>
         {
             // Mientras quedan hojas difíciles por leer, el firmado de alguno puede estar en ellas: no se firman iniciales.
@@ -1010,6 +1084,8 @@ public partial class Ventana
                 lista.Add(Nota(f.Dificiles == 1
                     ? "Queda 1 hoja difícil por leer de este cliente. Para firmar iniciales, esperá a que termine: el firmado puede estar ahí."
                     : $"Quedan {f.Dificiles} hojas difíciles por leer de este cliente. Para firmar iniciales, esperá a que terminen: el firmado puede estar ahí."));
+            // Lo de otro mes va arriba de todo: es un aviso, y explica por qué a alguno le falta el suyo.
+            if (r.DeOtroMesPendientes.Any()) lista.Add(SeccionOtroMes(f, r));
             if (Clientes.NoMandoNada(r)) lista.Add(UltimoRecurso(f));
             if (r.Nomina is not null) lista.Add(Seccion("Empleados"));
             if (r.CarpetaMes is null) lista.Add(Nota($"No encontré la carpeta de {mes.ToLowerInvariant()} adentro de la de sueldos."));
@@ -1040,6 +1116,85 @@ public partial class Ventana
         guardarCliente.Visibility = Visibility.Collapsed;
         AbrirPanel(Muestra.Cliente);
         _ = PlanDelCliente(f, seccion);
+    }
+
+    // Los recibos de otro mes, plegados bajo un aviso en rojo. Tocándolo se despliegan, cada uno ya con el nombre y la forma
+    // con que se guardaría (la vista previa, al tocar su nombre), y abajo la casilla para llevarlos a los firmados de su mes.
+    // Nada viene marcado: los lleva «Guardar», con todo lo demás.
+    FrameworkElement SeccionOtroMes(FilaCliente f, Revision r)
+    {
+        const string Rojo = "SystemFillColorCriticalBrush";
+        var titulo = new TextBlock { Text = "ENCONTRÉ RECIBOS DE OTRO MES", FontSize = 11, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        titulo.SetResourceReference(TextBlock.ForegroundProperty, Rojo);
+        var giro = new RotateTransform();
+        var chevron = new TextBlock
+        {
+            Text = "\uE76C", FontFamily = (FontFamily)FindResource("Iconos"), FontSize = 9, Margin = new(6, 1, 0, 0), VerticalAlignment = VerticalAlignment.Center,
+            RenderTransformOrigin = new(0.5, 0.5), RenderTransform = giro,
+        };
+        chevron.SetResourceReference(TextBlock.ForegroundProperty, Rojo);
+        var fila = new StackPanel { Orientation = Orientation.Horizontal, Background = Brushes.Transparent, Children = { titulo, chevron } };
+        var cabeza = new Button { Style = (Style)FindResource("Llano"), Content = fila, HorizontalAlignment = HorizontalAlignment.Left, Margin = new(0, 12, 0, 4) };
+        AutomationProperties.SetName(cabeza, "Encontré recibos de otro mes");
+
+        var cuerpo = new StackPanel();
+        var caja = new Border { Height = 0, ClipToBounds = true, Child = cuerpo };
+        var mes = Clientes.NombreMes(r.Mes).ToLowerInvariant();
+        foreach (var l in r.ALlevar.Where(l => !l.EnSuCarpeta))
+        {
+            var texto = Path.GetFileNameWithoutExtension(l.Archivo) + (l.Hojas.Count > 1 ? $" ({l.Hojas.Count} hojas)" : "")
+                + (l.PorNombre ? " · encontrado por el nombre, revisar" : "")
+                + (l.Carpeta is null ? $" · no encontré la carpeta de {Clientes.NombreMes(l.Mes).ToLowerInvariant()}" : "");
+            var (linea, marca, t) = LineaPlan(texto, l.Ruta ?? l.Archivo);
+            cuerpo.Children.Add(ConPrevia(linea, ComoQueda(r, new(Accion.ASuMes, l.Ruta ?? l.Archivo, l.Empleado, l.Hojas)), tooltip: "Ver cómo va a quedar", aire: 0));
+            if (l.Ruta is { } ruta) lineasOtroMes[ruta] = (marca, t);
+        }
+        // Los que no se pueden llevar: de nadie de la nómina, o con el mes todavía por confirmar.
+        foreach (var g in r.DeOtroMesPendientes.Where(o => o.PorConfirmar || o.Cuils.Count == 0).GroupBy(o => o.Hoja.Ruta, StringComparer.OrdinalIgnoreCase))
+        {
+            var hojas = g.First().Hoja.Hoja > 0 ? $", hoja {string.Join(", ", g.Select(o => o.Hoja.Hoja))}" : "";
+            var porQue = g.All(o => o.PorConfirmar) ? "lo estoy releyendo para confirmar el mes" : "no sé de quién es: queda donde está";
+            var (linea, _, _) = LineaPlan($"{Path.GetFileName(g.Key)}{hojas} · {porQue}", g.Key);
+            cuerpo.Children.Add(ConPrevia(linea, Hojas(g.Select(o => o.Hoja).ToList()), aire: 0));
+        }
+        var llevables = r.ALlevar.Where(l => !l.EnSuCarpeta && l.Ruta is not null).ToList();
+        if (llevables.Count > 0)
+        {
+            var carpetas = llevables.Select(l => l.Carpeta!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var dondeVan = carpetas.Count == 1
+                ? $"en «{Path.GetFileName(carpetas[0])}», en la carpeta de {Clientes.NombreMes(llevables[0].Mes).ToLowerInvariant()}"
+                : "en los firmados de su mes";
+            var casilla = new CheckBox
+            {
+                Content = "Moverlos a donde corresponde", FontSize = 12, Margin = new(0, 8, 0, 4), IsChecked = aSuMes.Contains(f.Ruta),
+                ToolTip = $"Al guardar, quedan derechos, con más contraste y con su nombre {dondeVan}, sin pisar nada. Los originales quedan donde están.",
+            };
+            // Checked y Unchecked, no Click: tildada con UI Automation, Click no se dispara (ver la casilla de las iniciales).
+            void Cambio(object _, RoutedEventArgs __)
+            {
+                if (casilla.IsChecked == true) aSuMes.Add(f.Ruta);
+                else aSuMes.Remove(f.Ruta);
+                if (elegida == f && muestra == Muestra.Cliente && paraGuardar is { } destino) _ = PlanDelCliente(f, destino);
+            }
+            casilla.Checked += Cambio;
+            casilla.Unchecked += Cambio;
+            cuerpo.Children.Add(casilla);
+        }
+
+        // Se despliega con un resorte y el chevron gira para abajo; al llegar, el alto queda libre, para que crezca con las
+        // vistas previas que se abran adentro. Al apretar, el chevron ya empieza a girar.
+        var abierta = false;
+        Hundir(cabeza, 0.97, apretado => Resorte.Animar((giro, "giro"), (abierta ? 90 : 0) + (apretado ? (abierta ? -20 : 20) : 0), v => giro.Angle = v, rigidez: 420, rebote: 0.3));
+        cabeza.Click += (_, _) =>
+        {
+            abierta = !abierta;
+            Resorte.Animar((giro, "giro"), abierta ? 90 : 0, v => giro.Angle = v, rigidez: 300, rebote: 0.3);
+            cuerpo.Measure(new Size(Math.Max(200, panelLista.ActualWidth - 24), double.PositiveInfinity));
+            Resorte.Animar((caja, "alto"), abierta ? cuerpo.DesiredSize.Height : 0, v => caja.Height = Math.Max(0, v),
+                desde: double.IsNaN(caja.Height) ? caja.ActualHeight : null, rigidez: 260, rebote: 0.1,
+                alLlegar: () => { if (abierta) caja.Height = double.NaN; });
+        };
+        return new StackPanel { Children = { cabeza, caja } };
     }
 
     // Un cliente que no mandó ningún firmado: se ofrece armarlos todos con las iniciales del estudio, dicho como lo que es,
@@ -1087,7 +1242,8 @@ public partial class Ventana
         var suyos = ElegidosDe(f);
         guardarCliente.Visibility = Visibility.Collapsed;
         List<Escritura> suyo;
-        try { suyo = await Task.Run(() => Clientes.Planear(r, suyos)); }
+        var llevar = aSuMes.Contains(f.Ruta);
+        try { suyo = await Task.Run(() => Clientes.Planear(r, suyos, llevar)); }
         catch (Exception ex) { suyo = []; destino.Children.Clear(); destino.Children.Add(Nota($"⚠ {ex.Message}")); }
         if (turno != turnoPlanCliente || elegida != f || muestra != Muestra.Cliente) return;
         destino.Children.Clear();
@@ -1100,6 +1256,9 @@ public partial class Ventana
         foreach (var e in suyo)
             if (e.Empleado is { } emp && ranuras.TryGetValue(emp.Cuil, out var ranura) && EnRenglon(r, e, ranura, conIcono) is { } marca)
                 marcas[e] = (marca, ranura.Debajo);
+        // Lo que se lleva a otro mes acusa recibo en su renglón de la lista de otro mes.
+        foreach (var e in suyo.Where(e => e.Accion == Accion.ASuMes))
+            if (lineasOtroMes.TryGetValue(e.Ruta, out var linea)) marcas[e] = linea;
         // Si al recalcular ya no va el de alguno, sus íconos se desvanecen.
         foreach (var cuil in iconosPlan.Keys.Except(conIcono).ToList())
         {
@@ -1236,9 +1395,13 @@ public partial class Ventana
         static string Quien(Escritura e) => Regex.Replace(Path.GetFileNameWithoutExtension(e.Ruta), @"\s\d{2}\s\d{4}$", "");
         static string DondeVa(Escritura e) => Path.GetFileName(Path.GetDirectoryName(e.Ruta)) ?? "";
         foreach (var e in items.Where(e => e.Accion == Accion.Carpeta))
-            Grupo(Carpeta, Path.GetFileName(e.Ruta), "", [e], _ => "Carpeta nueva");
+            Grupo(Carpeta, Path.GetFileName(e.Ruta), "", [e], _ => $"Carpeta nueva, en «{Path.GetFileName(Path.GetDirectoryName(e.Ruta))}»");
         foreach (var g in items.Where(e => e.Accion == Accion.Corregido).GroupBy(DondeVa))
             Grupo(Carpeta, g.Key, "Enderezamos estos firmados y les subimos el contraste:", g, e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
+        // Lo que va a otro mes, con la carpeta de ese mes en el título: «09 SEPTIEMBRE 2026 › RECIBOS FIRMADOS SEPTIEMBRE».
+        foreach (var g in items.Where(e => e.Accion == Accion.ASuMes).GroupBy(e => Path.GetDirectoryName(e.Ruta)!, StringComparer.OrdinalIgnoreCase))
+            Grupo(Carpeta, $"{Path.GetFileName(Path.GetDirectoryName(g.Key))} › {Path.GetFileName(g.Key)}", "Llevamos a su mes estos recibos, derechos y con más contraste:", g,
+                e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
         foreach (var g in items.Where(e => e.Accion == Accion.Iniciales).GroupBy(DondeVa))
             Grupo(Carpeta, g.Key, "Firmamos con las iniciales del estudio:", g, Quien);
         foreach (var e in items.Where(e => e.Accion == Accion.Consolidado))
@@ -1258,7 +1421,7 @@ public partial class Ventana
     // texto de la lista. Lo arma el mismo código que después lo guarda.
     static Func<Task<List<UIElement>>>? ComoQueda(Revision r, Escritura e) => e.Accion switch
     {
-        Accion.Corregido or Accion.Consolidado => async () =>
+        Accion.Corregido or Accion.Consolidado or Accion.ASuMes => async () =>
         {
             var lista = new List<UIElement>();
             foreach (var h in e.Hojas.Take(3)) lista.Add(Imagen(DesdeJpeg(await Task.Run(() => ComoSeGuarda(h)))));
@@ -1362,6 +1525,12 @@ public partial class Ventana
             _ => (Lapiz, Amarillo, ConBaja($"{(baja is null ? "falta la firma" : "falta la liquidación final firmada")} · CUIL {x.Empleado.Cuil}"),
                 baja is null ? "Falta la firma: está su recibo sin firmar, pero no volvió firmado" : "Se fue en el mes: está su liquidación final sin firmar, pero no volvió firmada"),
         };
+        if (f.Revision is { } revision && DeQueMeses(revision.OtrosMeses, x.Empleado.Cuil) is { } ajeno)
+        {
+            var llego = x.Firma == Firma.Falta ? $"llegó el de {ajeno}" : $"además hay uno de {ajeno}";
+            nota = nota.Length > 0 ? $"{nota} · {llego}" : llego;
+            explica += $". Entre los firmados hay un recibo suyo de {ajeno}: no cuenta para este mes";
+        }
         var disco = new Grid
         {
             Width = 16, Height = 16, Margin = new(0, 2, 8, 0), VerticalAlignment = VerticalAlignment.Top, Background = Brushes.Transparent, ToolTip = explica,
@@ -1644,12 +1813,15 @@ public partial class Ventana
         // Los ocultos no cuentan.
         var activos = porCliente.Values.Where(f => !EsOculto(f)).ToList();
         var rojo = activos.Any(f => f.Grupo == 0);
+        // En amarillo sin que falte ninguna firma: lo único que tienen son recibos de otro mes entre los firmados.
+        var soloDeOtroMes = activos.Where(f => f.Grupo == 1).All(f => f.Revision is { Faltan: 0, Firmados: not null });
         var (texto, icono, color) = porCliente.Count == 0 ? ("No hay clientes con sueldos", Alerta, 0)
             : activos.Count == 0 ? ("Todos los clientes están ocultos", Raya, 3)
             // Un mes sin carpetas (todavía no empezó, o se eligió otro sin querer) no es «Todos OK»: no se revisó nada.
             : activos.All(f => f.Grupo == 3) ? ($"Nada para revisar en {Clientes.NombreMes(mesElegido).ToLowerInvariant()}", Raya, 3)
             : faltanClientes == 0 && valor < 0.5 ? ("Todos OK", Tilde, 2)
             : rojo ? (k == 1 ? "Faltan recibos de 1 cliente" : $"Faltan recibos de {k} clientes", Alerta, 0)
+            : soloDeOtroMes ? (k == 1 ? "Hay recibos de otro mes en 1 cliente" : $"Hay recibos de otro mes en {k} clientes", Alerta, 1)
             : (k == 1 ? "Faltan firmas de 1 cliente" : $"Faltan firmas de {k} clientes", Lapiz, 1);
         clientesCartelTexto.Text = texto;
         if (clientesCartelIcono.Text != icono)
@@ -1771,7 +1943,8 @@ public partial class Ventana
         var g = generacionClientes;
         var corte = corteClientes?.Token ?? CancellationToken.None;
         var (mes, anio) = (mesElegido, anioElegido);
-        foreach (var f in porCliente.Values.Where(f => f.Revision is null && !EsOculto(f) && !porRevisar.Contains(f.Ruta) && f != leyendo).OrderBy(f => f.Orden).ToList())
+        // Los que esperan su turno con el OCR (PorLeer) los lee la revisión, en orden.
+        foreach (var f in porCliente.Values.Where(f => f.Revision is null && f.PorLeer == 0 && !EsOculto(f) && !porRevisar.Contains(f.Ruta) && f != leyendo).OrderBy(f => f.Orden).ToList())
         {
             try { await turnoLectura.WaitAsync(corte); }
             catch (OperationCanceledException) { return; }
@@ -1780,13 +1953,13 @@ public partial class Ventana
                 if (g != generacionClientes || EsOculto(f) || f.Revision is not null) continue;
                 Rueda(f, true);
                 leyendo = f;
-                var r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                var r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte, Huella), corte);
                 if (g != generacionClientes) return;
                 ResolverCliente(f, r);
                 if (f.Dificiles > 0 && lectorAFondo is { } aFondo)
                 {
-                    await Task.Run(() => Clientes.Profundizar(r, aFondo, mem, _ => { }, corte), corte);
-                    r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte), corte);
+                    await Task.Run(() => Clientes.Profundizar(r, aFondo, mem, _ => { }, corte, Huella), corte);
+                    r = await Task.Run(() => Clientes.Revisar(f.Ruta, mes, anio, ocr, lector, mem, _ => { }, corte, Huella), corte);
                     if (g != generacionClientes) return;
                     ResolverCliente(f, r);
                 }
@@ -1882,12 +2055,13 @@ public partial class Ventana
         planeando = true;
         var filas = porCliente.Values.Where(f => f.Revision is not null && !EsOculto(f)).ToList();
         var porFila = filas.ToDictionary(f => f, ElegidosDe);
+        var llevan = filas.Where(f => aSuMes.Contains(f.Ruta)).ToHashSet();
         guardarTexto.Text = "Armando la lista…";
         List<(FilaCliente Fila, Escritura E)> nuevo;
         try
         {
             // Planear mira en la carpeta de los clientes qué existe ya: afuera del hilo de la ventana.
-            nuevo = await Task.Run(() => filas.SelectMany(f => Clientes.Planear(f.Revision!, porFila[f]).Select(e => (f, e))).ToList());
+            nuevo = await Task.Run(() => filas.SelectMany(f => Clientes.Planear(f.Revision!, porFila[f], llevan.Contains(f)).Select(e => (f, e))).ToList());
         }
         catch (Exception ex)
         {
@@ -1913,6 +2087,7 @@ public partial class Ventana
         {
             Cuantos(Accion.Corregido, "1 firmado corregido", "firmados corregidos"),
             Cuantos(Accion.Iniciales, "1 con iniciales", "con iniciales"),
+            Cuantos(Accion.ASuMes, "1 llevado a su mes", "llevados a su mes"),
             Cuantos(Accion.Consolidado, "1 consolidado", "consolidados"),
             Cuantos(Accion.Lista, "1 lista de faltantes", "listas de faltantes"),
             Cuantos(Accion.Carpeta, "1 carpeta nueva", "carpetas nuevas"),
@@ -1956,7 +2131,7 @@ public partial class Ventana
             // lo que se acaba de guardar. Revisarlo es rápido: lo leído está en la memoria, y lo nuevo trae el
             // CUIL en las palabras clave.
             foreach (var p in g.Where(p => p.E.Accion != Accion.Lista)) await Uno(p, r);
-            var nueva = await Task.Run(() => Clientes.Revisar(fila.Ruta, r.Mes, r.Anio, ocr, lector, memoria!, _ => { }, CancellationToken.None));
+            var nueva = await Task.Run(() => Clientes.Revisar(fila.Ruta, r.Mes, r.Anio, ocr, lector, memoria!, _ => { }, CancellationToken.None, Huella));
             foreach (var p in g.Where(p => p.E.Accion == Accion.Lista)) await Uno(p, nueva);
             if (g0 == generacionClientes) ResolverCliente(fila, nueva);
         }

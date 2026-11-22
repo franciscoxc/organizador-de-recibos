@@ -105,6 +105,25 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   traer dos recibos: cada empleado se busca por su cuenta. Y si el escaneo ya
   trae el texto que le puso el escáner, que suele leer peor, la app lo vuelve a
   leer con su OCR cuando ese texto no alcanza para encontrar a todos.
+- Primero revisa a todos los clientes sin el OCR, que es un instante: los que ya
+  están leídos, o no tienen fotos ni escaneos nuevos, aparecen enseguida. Los que
+  tienen hojas para leer dicen cuántas («12 hojas por leer») y esperan su turno:
+  el OCR va de a un cliente, y uno con muchas fotos ya no frena a los que siguen.
+- La misma imagen se lee una sola vez. Si una foto se bajó dos veces, o las mismas
+  hojas están repetidas en varios PDF, la app las reconoce por la huella de la
+  imagen y no las vuelve a leer, ni siquiera a fondo. Tampoco las repite en el PDF
+  que guarda de cada empleado.
+- Si entre los firmados hay un recibo de otro mes (dice «período de pago 09/2026»
+  y la carpeta es la de octubre), no cuenta como firmado de nadie. El renglón del
+  cliente lo avisa («hay recibos de septiembre»), y la barra de estado lo dice
+  cuando es lo único que queda por resolver. Arriba del panel aparece en rojo
+  «Encontré recibos de otro mes»: al tocarlo se despliegan, cada uno ya con el
+  nombre con que se guardaría y su vista previa, derecha y con contraste. De quién
+  es cada uno lo dice la nómina de su mes, que conoce también a los que ya no
+  están. Con la casilla «Moverlos a donde corresponde», «Guardar» los lleva a los
+  firmados de su mes (y crea esa carpeta si no está), sin pisar nada; desde ahí
+  la app deja de avisar de ellos. Si el período sale del texto que le puso el
+  escáner, antes lo confirma la lectura de la app.
 - Un renglón por cliente, siempre por orden alfabético: mientras sigue leyendo, la
   lista no se reordena y se puede ir mirando lo ya revisado. El color de cada
   renglón dice cómo está. Como en el Explorador, escribir el comienzo de un nombre
@@ -130,7 +149,9 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
   armarlos todos con las iniciales del estudio sobre los recibos originales. Es
   un último recurso, para cuando ya no hay tiempo de volver a pedirlos: cada uno
   se puede mirar antes de guardar, y en la lista quedan como «con iniciales».
-- Lo leído se recuerda: la segunda revisión lee solo lo nuevo.
+- Lo leído se recuerda: la segunda revisión lee solo lo nuevo. Y lo que ya pasó
+  por la lectura a fondo no se vuelve a intentar, tampoco en una copia del mismo
+  archivo con otro nombre.
 - La carpeta de los clientes se elige una sola vez y queda guardada en esa PC. Si
   su ruta nombra el año, al pasar a otro año la app busca la del año nuevo. Para
   elegir otra, la carpetita de la barra del mes; al pasar por encima dice cuál se
@@ -160,11 +181,16 @@ clic:
   llegó después), se completa: sus hojas quedan como estaban y lo que faltaba va
   al final. Cada hoja lleva escrito, invisible, quién está en ella: la revisión
   siguiente lo lee sin OCR, y con Ctrl+F se busca a cualquiera.
-- `FALTAN RECIBOS FIRMADOS MM AAAA.txt`, con los que faltan y los archivos en los
-  que no encontró a nadie.
+- `FALTAN RECIBOS FIRMADOS MM AAAA.txt`, con los que faltan, los archivos en los
+  que no encontró a nadie y los recibos de otro mes que estaban entre los
+  firmados.
 - La carpeta «RECIBOS FIRMADOS <MES>», solo si hay algo para guardar adentro.
+- Los recibos de otro mes, si se tildó «Moverlos a donde corresponde»: cada uno
+  derecho, con contraste y con su nombre en los firmados de su mes, con el CUIL y
+  el período en las palabras clave, así la revisión de ese mes los cuenta.
 
-Todo va a la carpeta de los firmados, que es lo que manda el cliente. Los recibos
+Todo va a la carpeta de los firmados, que es lo que manda el cliente (la de su
+mes, para los recibos de otro mes). Los originales quedan donde estaban. Los recibos
 sin firmar, los que arma el estudio para mandarle, no se tocan ni se separan: la
 app solo los lee. Nunca borra un archivo, y el único que reemplaza es el
 consolidado, al completarlo: lo arma aparte y recién entero ocupa el lugar del

@@ -932,6 +932,315 @@ public class ClientesTests(ITestOutputHelper salida)
         finally { Directory.Delete(raiz, true); }
     }
 
+    // ---- La misma imagen una sola vez, la pasada sin OCR y los recibos de otro mes ----
+
+    static (string, double, double)[][] HojasSinTexto(int cuantas) => Enumerable.Range(0, cuantas).Select(_ => Array.Empty<(string, double, double)>()).ToArray();
+
+    [Fact]
+    public async Task La_misma_imagen_repetida_se_lee_una_sola_vez()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var firmados = Firmados(cliente);
+            // La foto de Gómez bajada dos veces, y un PDF escaneado que la trae dos veces más, con la de Rojas al final.
+            foreach (var foto in new[] { "gomez.jpeg", "gomez (1).jpeg" }) File.WriteAllBytes(Path.Combine(firmados, foto), [0xFF, 0xD8]);
+            Pdf(Path.Combine(firmados, "TODOS.pdf"), HojasSinTexto(3));
+            static bool DeRojas(string ruta, int hoja) => Path.GetFileName(ruta) == "TODOS.pdf" && hoja == 3;
+            // La huella de la prueba: la de cada imagen, esté en el archivo que esté.
+            SacarHuella huella = (ruta, hoja) => Task.FromResult<string?>(DeRojas(ruta, hoja) ? "rojas" : "gomez");
+            var lecturas = 0;
+            LeerImagen leer = (ruta, hoja, _) =>
+            {
+                Interlocked.Increment(ref lecturas);
+                return Task.FromResult(new Lectura($"CUIL {(DeRojas(ruta, hoja) ? Rojas : Gomez).Cuil} PERIODO DE PAGO 10/2026", Ocr: true));
+            };
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, leer, memoria, _ => { }, CancellationToken.None, huella);
+            // Cinco hojas y dos imágenes distintas: dos lecturas. Las cinco cuentan igual.
+            Assert.Equal(2, lecturas);
+            Assert.Equal([4, 1, 0, 0], r.Renglones.Select(x => x.Firmado.Count));
+            // Otra copia que llega después se reconoce por la huella, sin leerla.
+            File.WriteAllBytes(Path.Combine(firmados, "gomez (2).jpeg"), [0xFF, 0xD8]);
+            r = await Clientes.Revisar(cliente, 10, 2026, null, leer, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Equal(2, lecturas);
+            Assert.Equal(5, r.Renglones[0].Firmado.Count);
+            // Y en el PDF que se guarda de Gómez, la hoja va una sola vez.
+            Assert.Single(Assert.Single(Clientes.Planear(r, new HashSet<string>()), e => e.Accion == Accion.Corregido && e.Empleado == Gomez).Hojas);
+            // Sin la huella (un OCR que no la da) se lee todo, como antes.
+            lecturas = 0;
+            await Clientes.Revisar(cliente, 10, 2026, null, leer, new Memoria(Path.Combine(raiz, "otra.json")), _ => { }, CancellationToken.None);
+            Assert.Equal(6, lecturas);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task La_lectura_a_fondo_lee_una_vez_cada_imagen()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // La misma foto ilegible, tres veces.
+            foreach (var foto in new[] { "a.jpeg", "b.jpeg", "c.jpeg" }) File.WriteAllBytes(Path.Combine(Firmados(cliente), foto), [0xFF, 0xD8]);
+            SacarHuella huella = (_, _) => Task.FromResult<string?>("la misma");
+            LeerImagen rapida = (_, _, _) => Task.FromResult(new Lectura("x 1 / ;", Ocr: true));
+            var aFondo = 0;
+            LeerImagen fondo = (_, _, _) =>
+            {
+                Interlocked.Increment(ref aFondo);
+                return Task.FromResult(new Lectura($"CUIL {Gomez.Cuil}", Ocr: true, Giro: 90));
+            };
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, rapida, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Equal(3, r.Ilegibles.Count);
+            Assert.Equal(3, await Clientes.Profundizar(r, fondo, memoria, _ => { }, CancellationToken.None));
+            Assert.Equal(1, aFondo);
+            // Las tres copias quedan con lo que se leyó de una.
+            r = await Clientes.Revisar(cliente, 10, 2026, null, rapida, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Empty(r.Ilegibles);
+            Assert.Equal(3, r.Renglones[0].Firmado.Count);
+            Assert.All(r.Renglones[0].Firmado, h => Assert.Equal(90, h.Lectura.Giro));
+            Assert.Empty(Clientes.Dificiles(r));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task La_copia_de_un_PDF_ya_leido_a_fondo_no_se_lee_de_nuevo()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // Un escaneo con el texto del escáner, que no deja ver a nadie: va a la lectura a fondo, y ahí tampoco aparece.
+            Escaneo(Path.Combine(Firmados(cliente), "ESCANEO.pdf"), "FIRMA DEL EMPLEADO x 1 / ;");
+            SacarHuella huella = (_, _) => Task.FromResult<string?>("la del escaneo");
+            LeerImagen nadie = (_, _, _) => throw new InvalidOperationException("tiene texto: la lectura rápida no la toca");
+            var aFondo = 0;
+            LeerImagen fondo = (_, _, _) =>
+            {
+                Interlocked.Increment(ref aFondo);
+                return Task.FromResult(new Lectura("y 2 / ;", Ocr: true));
+            };
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, nadie, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Equal(1, await Clientes.Profundizar(r, fondo, memoria, _ => { }, CancellationToken.None, huella));
+            Assert.Equal(1, aFondo);
+            // Lo bajan otra vez, con otro nombre: es la misma imagen, y lo que se sacó de ella es lo mejor que se pudo.
+            File.Copy(Path.Combine(Firmados(cliente), "ESCANEO.pdf"), Path.Combine(Firmados(cliente), "ESCANEO (1).pdf"));
+            r = await Clientes.Revisar(cliente, 10, 2026, null, nadie, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Single(Clientes.Dificiles(r));
+            await Clientes.Profundizar(r, fondo, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Equal(1, aFondo);
+            r = await Clientes.Revisar(cliente, 10, 2026, null, nadie, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Empty(Clientes.Dificiles(r));
+            Assert.Equal(2, r.Ilegibles.Count);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Sin_OCR_dice_cuantas_hojas_quedan_por_leer()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            // Tres fotos y un escaneo de dos hojas entre los firmados.
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: true);
+            Pdf(Path.Combine(Firmados(cliente), "ESCANEO.pdf"), HojasSinTexto(2));
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            // La pasada rápida no lee ninguna: dice cuántas esperan, y no las da por leídas.
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(5, r.PorLeer);
+            LeerImagen leer = (ruta, _, _) => Task.FromResult(new Lectura(Fotos.GetValueOrDefault(Path.GetFileName(ruta), "x 1 / ;"), Ocr: true));
+            r = await Clientes.Revisar(cliente, 10, 2026, null, leer, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(0, r.PorLeer);
+            // Ya leídas, la pasada rápida siguiente tiene todo: no queda nada esperando.
+            r = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(0, r.PorLeer);
+            Assert.Equal(Firma.Firmado, r.Renglones[0].Firma);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Theory]
+    [InlineData("PERIODO DE PAGO 09/2026", 9)]
+    [InlineData("PERIODO DE PAGO | SUELDO BRUTO | 09/2026 | 721.677,15", 9)] // el OCR no siempre lo deja al lado del rótulo
+    [InlineData("PERIODO DE PAGO 9 / 2026", 9)]
+    [InlineData("PERIODO DE PAGO 10/2026", null)]
+    [InlineData("PERIODO 10/2020", null)] // el año mal leído en una foto borrosa: el mes es el que se revisa
+    [InlineData("FECHA INGRESO 01/09/2026", null)] // una fecha entera no es un período
+    [InlineData("recibo de 09/2026 y recibo de 10/2026 en la misma hoja", null)]
+    [InlineData("sin ningún período", null)]
+    public void Reconoce_el_recibo_de_otro_mes(string texto, int? mes) => Assert.Equal(mes, Clientes.OtroMes(texto, 10));
+
+    [Fact]
+    public async Task Un_recibo_de_otro_mes_no_cuenta_y_se_avisa()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var textos = new Dictionary<string, string>
+            {
+                // El de Gómez es el de septiembre; el de Rojas, de octubre con el año mal leído; el de López no deja ver el período.
+                ["gomez.jpeg"] = $"CUIL {Gomez.Cuil} FECHA INGRESO 01/09/2024 PERIODO DE PAGO 09/2026",
+                ["rojas.jpeg"] = $"CUIL {Rojas.Cuil} PERIODO DE PAGO 10/2020",
+                ["lopez.jpeg"] = $"CUIL {Lopez.Cuil} FECHA INGRESO 01/09/2024",
+                // De alguien que no está en la nómina, también de septiembre.
+                ["otro.jpeg"] = "CUIL 20-12345678-6 PERIODO DE PAGO 09/2026",
+                // Y el de septiembre de Ruiz, donde el CUIL no se lee: se sabe que es suyo por el nombre.
+                ["foto.jpeg"] = "APELLIDO Y NOMBRE RUIZ, LUIS CUIL 2?-1??22333-9 PERIODO DE PAGO 09/2026",
+            };
+            foreach (var foto in textos.Keys) File.WriteAllBytes(Path.Combine(Firmados(cliente), foto), [0xFF, 0xD8]);
+            LeerImagen leer = (ruta, _, _) => Task.FromResult(new Lectura(textos[Path.GetFileName(ruta)], Ocr: true));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, leer, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            // A Gómez le sigue faltando el de octubre: el de septiembre no es su firmado.
+            Assert.Equal([Firma.Falta, Firma.Firmado, Firma.Firmado, Firma.Falta], r.Renglones.Select(x => x.Firma));
+            Assert.Equal(["foto.jpeg", "gomez.jpeg", "otro.jpeg"], r.OtrosMeses.Select(o => Path.GetFileName(o.Hoja.Ruta)).Order());
+            Assert.All(r.OtrosMeses, o => Assert.Equal(9, o.Mes));
+            // De quién es cada uno: por el CUIL, por el nombre, o de nadie de la nómina.
+            Assert.Equal([Gomez.Cuil], r.OtrosMeses.Single(o => o.Hoja.Ruta.EndsWith("gomez.jpeg")).Cuils);
+            Assert.Equal([Ruiz.Cuil], r.OtrosMeses.Single(o => o.Hoja.Ruta.EndsWith("foto.jpeg")).Cuils);
+            Assert.Empty(r.OtrosMeses.Single(o => o.Hoja.Ruta.EndsWith("otro.jpeg")).Cuils);
+            // El de alguien que no está en la nómina no es una hoja «sin identificar»: se sabe qué es.
+            Assert.Empty(r.Ilegibles);
+            Assert.Empty(Clientes.Dificiles(r));
+            // No se guarda como el firmado de Gómez, y la lista que queda en la carpeta lo dice.
+            var plan = Clientes.Planear(r, new HashSet<string>());
+            Assert.DoesNotContain(plan, e => e.Accion == Accion.Corregido && e.Empleado == Gomez);
+            Assert.Contains(plan, e => e.Accion == Accion.Lista);
+            Assert.Contains("gomez.jpeg · de septiembre", Clientes.Lista(r));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Theory]
+    [InlineData(9, 10, 2026, 2026)]
+    [InlineData(12, 1, 2027, 2026)] // diciembre, revisando enero: el del año anterior
+    [InlineData(8, 7, 2026, 2026)] // el mes siguiente
+    [InlineData(1, 12, 2026, 2027)]
+    [InlineData(4, 10, 2026, 2026)] // a seis meses de los dos lados: el pasado
+    public void El_recibo_de_otro_mes_es_del_anio_mas_cercano(int suMes, int mes, int anio, int esperado) =>
+        Assert.Equal(esperado, Clientes.AnioDe(suMes, mes, anio));
+
+    // Como Nomina y Recibo, pero de otro período.
+    static (string, double, double)[] DelPeriodo(string periodo, (string, double, double)[] hoja) =>
+        hoja.Select(t => t.Item1 == "10/2026" ? (periodo, t.Item2, t.Item3) : t).ToArray();
+
+    [Fact]
+    public async Task Lleva_los_recibos_de_otro_mes_a_su_carpeta_sin_pisar_nada()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // Septiembre, con su nómina y sus recibos sin firmar: Vega se fue en septiembre, y no está en la de octubre.
+            var vega = new Empleado("20-12345678-6", "VEGA IRENE");
+            var septiembre = Path.Combine(Path.GetDirectoryName(Mes(cliente))!, "PEREZ JUAN SUELDOS SEPTIEMBRE 2026");
+            Directory.CreateDirectory(Path.Combine(septiembre, "SUSS Y SIND"));
+            Pdf(Path.Combine(septiembre, "SUSS Y SIND", "PEREZ JUAN SUSS NOMINA 09 2026.pdf"), DelPeriodo("09/2026", Nomina(Gomez, Rojas, vega)));
+            Pdf(Path.Combine(septiembre, "PEREZ JUAN RECIBOS 09 2026.PDF"), DelPeriodo("09/2026", Recibo(Gomez)), DelPeriodo("09/2026", Recibo(vega)));
+            // Con los firmados de octubre llegaron tres de septiembre: el de Gómez, el de Vega (se lee su nombre, no su CUIL) y
+            // uno de nadie que se pueda reconocer.
+            var textos = new Dictionary<string, string>
+            {
+                ["gomez sept.jpeg"] = $"CUIL {Gomez.Cuil} PERIODO DE PAGO 09/2026",
+                ["vega.jpeg"] = "APELLIDO Y NOMBRE VEGA, IRENE CUIL 2?-1??45678-6 PERIODO DE PAGO 09/2026",
+                ["borrosa.jpeg"] = "x / ; PERIODO DE PAGO 09/2026",
+            };
+            var firmados = Firmados(cliente);
+            foreach (var foto in textos.Keys) File.WriteAllBytes(Path.Combine(firmados, foto), [0xFF, 0xD8]);
+            LeerImagen leer = (ruta, _, _) => Task.FromResult(new Lectura(textos[Path.GetFileName(ruta)], Ocr: true));
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, leer, memoria, _ => { }, CancellationToken.None);
+
+            // De quién es cada uno sale de la nómina de septiembre, y el nombre, de sus recibos sin firmar.
+            Assert.Equal([vega.Cuil], r.OtrosMeses.Single(o => o.Hoja.Ruta.EndsWith("vega.jpeg")).Cuils);
+            Assert.Empty(r.OtrosMeses.Single(o => o.Hoja.Ruta.EndsWith("borrosa.jpeg")).Cuils);
+            var adonde = Path.Combine(septiembre, "RECIBOS FIRMADOS SEPTIEMBRE");
+            Assert.Equal([Path.Combine(adonde, "GOMEZ LUCIA 09 2026.pdf"), Path.Combine(adonde, "VEGA IRENE 09 2026.pdf")], r.ALlevar.Select(l => l.Ruta));
+            Assert.Equal([false, true], r.ALlevar.Select(l => l.PorNombre));
+            Assert.Equal(3, r.DeOtroMesPendientes.Count());
+
+            // Sin pedirlo no se lleva nada. Pidiéndolo: la carpeta de los firmados de septiembre, que no estaba, y después
+            // los dos. El que no se sabe de quién es queda donde está.
+            Assert.DoesNotContain(Clientes.Planear(r, new HashSet<string>()), e => e.Accion == Accion.ASuMes || e.Ruta.StartsWith(septiembre));
+            var plan = Clientes.Planear(r, new HashSet<string>(), aSuMes: true).Where(e => e.Ruta.StartsWith(septiembre)).ToList();
+            Assert.Equal([Accion.Carpeta, Accion.ASuMes, Accion.ASuMes], plan.Select(e => e.Accion));
+            Corregir corregir = _ => Task.FromResult((Convert.FromBase64String(Jpeg), 2, 2));
+            foreach (var e in plan) await Clientes.Escribir(e, r, corregir);
+
+            // Llegaron con el período y el CUIL en las palabras clave: la revisión de septiembre los cuenta sin OCR, y el de
+            // Vega sigue para revisar, porque se la encontró por el nombre.
+            using (var doc = PdfDocument.Open(Path.Combine(adonde, "GOMEZ LUCIA 09 2026.pdf"))) Assert.Equal($"{Gomez.Cuil} 09/2026", doc.Information.Keywords);
+            LeerImagen nadie = (_, _, _) => throw new InvalidOperationException("no debería leer nada");
+            var deSeptiembre = await Clientes.Revisar(cliente, 9, 2026, null, nadie, new Memoria(Path.Combine(raiz, "septiembre.json")), _ => { }, CancellationToken.None);
+            Assert.Equal([Firma.Firmado, Firma.Falta, Firma.PorNombre], deSeptiembre.Renglones.Select(x => x.Firma));
+
+            // En octubre ya no hay nada para llevar: solo queda el que no se sabe de quién es. Los originales siguen ahí.
+            r = await Clientes.Revisar(cliente, 10, 2026, null, leer, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(["borrosa.jpeg"], r.DeOtroMesPendientes.Select(o => Path.GetFileName(o.Hoja.Ruta)));
+            Assert.DoesNotContain(Clientes.Planear(r, new HashSet<string>(), aSuMes: true), e => e.Accion == Accion.ASuMes);
+            Assert.All(textos.Keys, foto => Assert.True(File.Exists(Path.Combine(firmados, foto))));
+            Assert.DoesNotContain("gomez sept.jpeg", Clientes.Lista(r));
+            Assert.Contains("borrosa.jpeg · de septiembre", Clientes.Lista(r));
+            // Y lo que ya está no se pisa: escribirlo otra vez falla, y el archivo queda como estaba.
+            var antes = File.ReadAllBytes(plan[1].Ruta);
+            await Assert.ThrowsAsync<IOException>(() => Clientes.Escribir(plan[1], r, corregir));
+            Assert.Equal(antes, File.ReadAllBytes(plan[1].Ruta));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Sin_la_carpeta_de_su_mes_no_se_lleva()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            File.WriteAllBytes(Path.Combine(Firmados(cliente), "gomez.jpeg"), [0xFF, 0xD8]);
+            LeerImagen leer = (_, _, _) => Task.FromResult(new Lectura($"CUIL {Gomez.Cuil} PERIODO DE PAGO 09/2026", Ocr: true));
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, leer, new Memoria(Path.Combine(raiz, "memoria.json")), _ => { }, CancellationToken.None);
+            // Se sabe de quién es (por la nómina de octubre) y cómo se llamaría, pero no hay adónde llevarlo.
+            var l = Assert.Single(r.ALlevar);
+            Assert.Equal(("GOMEZ LUCIA 09 2026.pdf", (string?)null), (l.Archivo, l.Ruta));
+            Assert.DoesNotContain(Clientes.Planear(r, new HashSet<string>(), aSuMes: true), e => e.Accion is Accion.ASuMes or Accion.Carpeta);
+            Assert.Single(r.DeOtroMesPendientes);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task El_periodo_que_leyo_el_escaner_lo_confirma_la_lectura_a_fondo()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            // Un escaneo con el texto del escáner, que leyó mal el período: dice septiembre y es el de octubre.
+            Escaneo(Path.Combine(Firmados(cliente), "ESCANEO.pdf"), $"FIRMA DEL EMPLEADO CUIL {Gomez.Cuil} PERIODO DE PAGO 09/2026");
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            LeerImagen nadie = (_, _, _) => throw new InvalidOperationException("tiene texto: la lectura rápida no la toca");
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, nadie, memoria, _ => { }, CancellationToken.None);
+            // Por ahora figura de otro mes, pero queda por confirmar: va a la lectura a fondo.
+            Assert.True(Assert.Single(r.OtrosMeses).PorConfirmar);
+            Assert.Single(Clientes.Dificiles(r));
+            LeerImagen fondo = (_, _, _) => Task.FromResult(new Lectura($"CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026", Ocr: true));
+            await Clientes.Profundizar(r, fondo, memoria, _ => { }, CancellationToken.None);
+            // La app leyó octubre: es su firmado.
+            r = await Clientes.Revisar(cliente, 10, 2026, null, nadie, memoria, _ => { }, CancellationToken.None);
+            Assert.Empty(r.OtrosMeses);
+            Assert.Equal(Firma.Firmado, r.Renglones[0].Firma);
+            Assert.Empty(Clientes.Dificiles(r));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
     // Con el OCR de la app sobre clientes reales: si junto al proyecto hay una carpeta «prueba-clientes» (copia de
     // algunos clientes, que no va al git), se revisa entera y se cuenta qué se encontró. Sin ella, pasa vacía.
     [Fact]
@@ -947,20 +1256,20 @@ public class ClientesTests(ITestOutputHelper salida)
         var reloj = System.Diagnostics.Stopwatch.StartNew();
         var revisiones = new List<Revision>();
         foreach (var cliente in Clientes.ConSueldos(raiz))
-            revisiones.Add(await Clientes.Revisar(cliente, 10, 2026, ocr, rapido, memoria, _ => { }, CancellationToken.None));
+            revisiones.Add(await Clientes.Revisar(cliente, 10, 2026, ocr, rapido, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella));
         salida.WriteLine($"primera pasada: {reloj.Elapsed.TotalSeconds:0} s");
         reloj.Restart();
         var dificiles = 0;
-        foreach (var r in revisiones) dificiles += await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None);
+        foreach (var r in revisiones) dificiles += await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella);
         salida.WriteLine($"segunda pasada: {dificiles} hojas difíciles en {reloj.Elapsed.TotalSeconds:0} s");
         memoria.Guardar();
         foreach (var cliente in Clientes.ConSueldos(raiz))
         {
-            var r = await Clientes.Revisar(cliente, 10, 2026, ocr, rapido, memoria, _ => { }, CancellationToken.None);
+            var r = await Clientes.Revisar(cliente, 10, 2026, ocr, rapido, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella);
             var fotos = r.Renglones.SelectMany(x => x.Firmado).Count(h => h.Lectura.Ocr);
             var plan = Clientes.Planear(r, new HashSet<string>());
             salida.WriteLine($"{r.Cliente}: nómina {r.Nomina?.Empleados.Count}, firmados {(r.Firmados is null ? "-" : Path.GetFileName(r.Firmados))}, " +
-                $"faltan {r.Faltan}, por nombre {r.Renglones.Count(x => x.Firma == Firma.PorNombre)}, hojas leídas con OCR {fotos}, " +
+                $"faltan {r.Faltan}, por nombre {r.Renglones.Count(x => x.Firma == Firma.PorNombre)}, de otro mes {r.OtrosMeses.Count}, hojas leídas con OCR {fotos}, " +
                 $"giros {string.Join(",", r.Renglones.SelectMany(x => x.Firmado).Where(h => h.Lectura.Ocr).Select(h => h.Lectura.Giro))}, " +
                 $"sin leer {r.Ilegibles.Count} ({string.Join(", ", r.Ilegibles.GroupBy(h => Path.GetExtension(h.Ruta).ToLowerInvariant() + (h.Hoja > 0 ? " escaneado" : " foto")).Select(g => $"{g.Count()} {g.Key}"))}), " +
                 $"guardaría {plan.Count(e => e.Accion == Accion.Corregido)} corregidos y {plan.FirstOrDefault(e => e.Accion == Accion.Consolidado)?.Hojas.Count ?? 0} hojas " +
@@ -996,9 +1305,9 @@ public class ClientesTests(ITestOutputHelper salida)
             if (c.Clientes is { } esperado)
             {
                 var cliente = Path.Combine(raiz, c.Cliente);
-                var r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None);
-                if (await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None) > 0)
-                    r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None);
+                var r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella);
+                if (await Clientes.Profundizar(r, aFondo, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella) > 0)
+                    r = await Clientes.Revisar(cliente, c.Mes, c.Anio, ocr, rapido, memoria, _ => { }, CancellationToken.None, WindowsOcr.Huella);
                 var plan = Clientes.Planear(r, new HashSet<string>());
                 Comparar(c.Caso, "faltan", esperado.Faltan, r.Faltan);
                 Comparar(c.Caso, "por nombre", esperado.PorNombre, r.Renglones.Count(x => x.Firma == Firma.PorNombre));
@@ -1008,6 +1317,9 @@ public class ClientesTests(ITestOutputHelper salida)
                 // El último recurso, con las iniciales del estudio para todos los que no tienen el firmado.
                 Comparar(c.Caso, "con iniciales", esperado.Iniciales,
                     Clientes.Planear(r, r.Renglones.Select(x => x.Empleado.Cuil).ToHashSet()).Count(p => p.Accion == Accion.Iniciales));
+                Comparar(c.Caso, "archivos de otro mes", esperado.DeOtroMes, r.OtrosMeses.Select(o => o.Hoja.Ruta).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+                Comparar(c.Caso, "para llevar a su mes", esperado.ASuMes,
+                    Clientes.Planear(r, new HashSet<string>(), aSuMes: true).Count(p => p.Accion == Accion.ASuMes));
             }
             if (c.Separar is { } separar)
             {
@@ -1029,6 +1341,6 @@ public class ClientesTests(ITestOutputHelper salida)
     }
 
     record Muestra(string Caso, string Cliente, int Mes, int Anio, EnClientes? Clientes, EnSeparar? Separar);
-    record EnClientes(int? Faltan, int? PorNombre, int? Corregidos, int? HojasDelConsolidado, int? Iniciales);
+    record EnClientes(int? Faltan, int? PorNombre, int? Corregidos, int? HojasDelConsolidado, int? Iniciales, int? DeOtroMes, int? ASuMes);
     record EnSeparar(string Pdf, int? Recibos, int? PorNombre, int? Faltan);
 }

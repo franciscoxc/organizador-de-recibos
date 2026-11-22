@@ -35,6 +35,17 @@ static class WindowsOcr
         return (await Jpeg(Retoque.Contraste(px), ancho, alto), ancho, alto);
     }
 
+    /// <summary>La huella de una foto o de una hoja escaneada: la de sus puntos, dibujada chica. Dos hojas con la misma
+    /// huella son la misma imagen, esté en el archivo que esté, y el OCR las lee una sola vez. Sacarla tarda unos 15 ms
+    /// por hoja; leerla, de 5 a 30 segundos.</summary>
+    // shortcut: como Cargar, lee el archivo entero por cada hoja; si un PDF de muchas hojas en una red lenta lo hace notar,
+    // leerlo una vez para todas.
+    internal static async Task<string?> Huella(string ruta, int hoja)
+    {
+        var (px, _, _) = await Cargar(ruta, hoja, 1000);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(px), 0, 16);
+    }
+
     // Una foto, o una hoja de un PDF escaneado (hoja desde 1), en BGRA y con el lado largo de maxLado o menos.
     internal static async Task<(byte[] Px, int Ancho, int Alto)> Cargar(string ruta, int hoja, int maxLado)
     {
