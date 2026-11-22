@@ -1,6 +1,6 @@
 # Organizador de Recibos
 
-**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.2.0/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.2.0/Organizador.de.Recibos.arm.exe)
+**[Descargar para Windows x64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.2.1/Organizador.de.Recibos.x64.exe)** · [Windows ARM64](https://github.com/franciscoxc/organizador-de-recibos/releases/download/v1.2.1/Organizador.de.Recibos.arm.exe)
 
 Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
