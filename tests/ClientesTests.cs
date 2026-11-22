@@ -1258,6 +1258,102 @@ public class ClientesTests(ITestOutputHelper salida)
     public void El_recibo_bajado_es_del_ultimo_mes_que_paso(int mes, int anio) => Assert.Equal(anio, Descargas.AnioDe(mes, new DateTime(2026, 11, 15)));
 
     [Fact]
+    public async Task Un_recibo_viejo_cuenta_su_anio_desde_la_fecha_de_su_archivo()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            // Hay carpetas de octubre de 2026, y dos recibos de octubre de Rojas: uno bajado ahora y otro del año pasado,
+            // con el archivo de noviembre de 2025. El viejo no va a octubre de 2026 aunque Rojas esté todavía en la nómina.
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            var (nuevo, viejo) = (Path.Combine(descargas, "nuevo.pdf"), Path.Combine(descargas, "viejo.pdf"));
+            Pdf(nuevo, HojasSinTexto(1));
+            Pdf(viejo, HojasSinTexto(1));
+            File.SetLastWriteTime(viejo, new DateTime(2025, 11, 3));
+            LeerImagen leer = (ruta, _, _) => Task.FromResult(new Lectura($"CUIL {Rojas.Cuil} PERIODO DE PAGO 10/{(ruta == viejo ? 2025 : 2026)}", Ocr: true));
+            var b = await Descargas.Revisar(descargas, anio => anio == 2026 ? clientes : null, new DateTime(2026, 11, 15), null, leer,
+                new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None);
+            var a = Assert.Single(b.Acomodos);
+            Assert.Equal(("ROJAS PABLO 10 2026.pdf", nuevo), (a.Recibo.Archivo, Assert.Single(a.Recibo.Hojas).Ruta));
+            var u = Assert.Single(b.SinUbicar);
+            Assert.Equal((viejo, "no encontré las carpetas de octubre 2025 de los clientes"), (u.Hoja.Ruta, u.PorQue));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task La_nomina_leida_queda_guardada_y_se_lee_de_nuevo_solo_si_cambia()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var mes = Mes(Cliente(raiz, "PEREZ JUAN", conFirmados: false));
+            Clientes.ArchivoNominas = Path.Combine(raiz, "nominas.json");
+            Assert.Equal([Gomez, Rojas, Lopez, Ruiz], (await Clientes.NominaDelMes(mes, 10, 2026, null, _ => { }, CancellationToken.None)).Nomina!.Empleados);
+            Clientes.GuardarNominas();
+
+            // Como si se abriera la app de nuevo, con el PDF ilegible pero del mismo tamaño y la misma fecha: sale lo guardado.
+            var pdf = Path.Combine(mes, "SUSS Y SIND", "PEREZ JUAN SUSS NOMINA 10 2026.pdf");
+            var fecha = File.GetLastWriteTimeUtc(pdf);
+            File.WriteAllBytes(pdf, new byte[new FileInfo(pdf).Length]);
+            File.SetLastWriteTimeUtc(pdf, fecha);
+            Clientes.CargarNominas();
+            Assert.Equal([Gomez, Rojas, Lopez, Ruiz], (await Clientes.NominaDelMes(mes, 10, 2026, null, _ => { }, CancellationToken.None)).Nomina!.Empleados);
+
+            // Con otra fecha (el estudio la reemplazó), se lee de nuevo: ya no es una nómina.
+            File.SetLastWriteTimeUtc(pdf, fecha.AddMinutes(1));
+            Assert.Null((await Clientes.NominaDelMes(mes, 10, 2026, null, _ => { }, CancellationToken.None)).Nomina);
+        }
+        finally
+        {
+            Clientes.ArchivoNominas = null;
+            Directory.Delete(raiz, true);
+        }
+    }
+
+    [Fact]
+    public async Task Lo_que_claramente_no_es_un_recibo_no_se_lee_a_fondo()
+    {
+        // Una carta escaneada que se leyó bien y no trae ninguna palabra de recibo; una foto que casi no se leyó, que sí puede serlo.
+        var carta = string.Join(" ", Enumerable.Repeat("Estimados vecinos les informamos que la administracion realizara trabajos de mantenimiento en los ascensores", 6));
+        var ilegible = "RCB HBRS 3l2 xx";
+        Assert.True(Descargas.NoEsRecibo(carta));
+        Assert.False(Descargas.NoEsRecibo(carta + " EMPLEADO OBRA SOCIAL"));
+        Assert.False(Descargas.NoEsRecibo(ilegible));
+
+        var leidas = new List<string>();
+        LeerImagen aFondo = (ruta, _, _) => { lock (leidas) leidas.Add(ruta); return Task.FromResult(new Lectura("", Ocr: true)); };
+        static SinUbicar Sin(string ruta, string texto) => new(new Hallazgo(ruta, 0, new Lectura(texto, Ocr: true)), "no dice de qué mes es");
+        var b = new Bandeja("descargas", [], [Sin("carta.jpg", carta), Sin("ilegible.jpg", ilegible)], new(), 0, []);
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            Assert.Equal(1, await Descargas.Profundizar(b, _ => null, new DateTime(2026, 11, 15), null, aFondo, new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None));
+            Assert.Equal(["ilegible.jpg"], leidas);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public void Lo_que_no_se_ubico_de_un_archivo_se_dice_en_pocas_palabras()
+    {
+        static SinUbicar Sin(string archivo, int hoja, string porQue) => new(new Hallazgo(archivo, hoja, new Lectura("texto")), porQue);
+        var extracto = Enumerable.Range(1, 170).Select(i => Sin("extracto.pdf", i, "no dice de qué mes es")).ToList();
+        var recibos = new[] { 3, 5, 6, 7, 9 }.Select(i => Sin("recibos.pdf", i, "no encontré su CUIL en las nóminas de octubre")).ToList();
+        var dos = Sin("dos.pdf", 2, "no dice de qué mes es");
+        var foto = Sin("foto.jpg", 0, "no se pudo leer");
+        // La primera hoja de «recibos.pdf» y la de «dos.pdf» sí se ubicaron.
+        var ubicadas = new ASuMes(Gomez, 10, 2026, "GOMEZ.pdf", "firmados", [new("recibos.pdf", 1, new Lectura("texto")), new("dos.pdf", 1, new Lectura("texto"))], false, false);
+        var b = new Bandeja("descargas", [new("PEREZ JUAN", ubicadas)], [.. extracto, .. recibos, dos, foto], new(), 0, []);
+        Assert.Equal("ningún recibo identificado en 170 hojas", Descargas.PorQueNo(b, extracto));
+        Assert.Equal("hojas 3, 5 a 7 y 9 · no encontré su CUIL en las nóminas de octubre", Descargas.PorQueNo(b, recibos));
+        Assert.Equal("hoja 2 · no dice de qué mes es", Descargas.PorQueNo(b, [dos]));
+        Assert.Equal("no se pudo leer", Descargas.PorQueNo(b, [foto]));
+    }
+
+    [Fact]
     public async Task Acomoda_las_descargas_en_su_cliente_y_su_mes_sin_pisar_ni_borrar_nada()
     {
         var raiz = Directory.CreateTempSubdirectory().FullName;

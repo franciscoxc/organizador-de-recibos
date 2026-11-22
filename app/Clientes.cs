@@ -344,15 +344,15 @@ public static class Clientes
         var avisos = new List<string>();
         var firmados = Subcarpetas(carpetaMes).Where(EsDeFirmados).ToList();
         Nomina? nomina = null;
+        _ = nominasGuardadas.Value; // la primera vez, trae las que quedaron guardadas en esta PC
         foreach (var f in (archivos ?? Archivos(carpetaMes)).Where(f => EsNomina(f) && !Dentro(firmados, f)))
         {
             corte.ThrowIfCancellationRequested();
             try
             {
-                // Cada nómina se lee una vez por archivo mientras la app está abierta: la revisión la pide dos veces por
-                // cliente (la pasada sin OCR y la de las fotos) y otra en cada «Revisar de nuevo».
-                // shortcut: no queda guardada al cerrar; las escaneadas (las de julio y agosto) se leen con OCR una vez
-                // por sesión. Si revisar esos meses se vuelve habitual, guardarlas en la memoria como las fotos.
+                // Cada nómina se lee una vez por archivo y queda guardada (ver Nominas): la revisión la pide dos veces por
+                // cliente (la pasada sin OCR y la de las fotos), otra en cada «Revisar de nuevo», Separar la de su mes y
+                // Descargas las de todos los clientes.
                 var clave = (f.FullName.ToUpperInvariant(), f.Length, f.LastWriteTimeUtc, ocr is not null);
                 if (!Nominas.TryGetValue(clave, out var leida))
                 {
@@ -363,6 +363,7 @@ public static class Clientes
                         else avisar(m);
                     });
                     Nominas[clave] = leida = (nueva, deEsta);
+                    GuardarNominasPronto();
                 }
                 avisos.AddRange(leida.Avisos);
                 if (leida.Nomina is not { } n) continue;
@@ -382,7 +383,60 @@ public static class Clientes
         return (nomina, avisos);
     }
 
+    /// <summary>Dónde quedan guardadas las nóminas leídas, en esta PC. Sin él (las pruebas), solo mientras la app está abierta.</summary>
+    public static string? ArchivoNominas { get; set; }
+
+    // Las nóminas leídas, por archivo, tamaño y fecha. Leer cada una tardaba de 165 a 640 ms en la VM (más en la PC del
+    // estudio, y con OCR las escaneadas), y Descargas lee las de todos los clientes en cada mes que aparece: quedan
+    // guardadas en ArchivoNominas para la próxima vez que se abre la app. La que cambió se lee de nuevo.
+    // shortcut: no se borran las de archivos que ya no están; con 1 KB por nómina y 53 por mes, crece unos 700 KB por año.
+    // Si pesa, guardar solo las usadas en el último año.
     static readonly ConcurrentDictionary<(string Ruta, long Tamano, DateTime Fecha, bool ConOcr), (Nomina? Nomina, List<string> Avisos)> Nominas = new();
+    static readonly Lazy<bool> nominasGuardadas = new(() => { CargarNominas(); return true; });
+    record NominaGuardada(string Ruta, long Tamano, DateTime Fecha, bool ConOcr, Nomina Nomina);
+    // Las de otra versión de la app se leen de nuevo: puede haber cambiado cómo se leen.
+    record NominasGuardadas(string Version, List<NominaGuardada> Nominas);
+    static readonly string VersionApp = typeof(Clientes).Assembly.GetName().Version?.ToString() ?? "";
+
+    internal static void CargarNominas()
+    {
+        Nominas.Clear();
+        try
+        {
+            if (ArchivoNominas is { } ruta && JsonSerializer.Deserialize<NominasGuardadas>(File.ReadAllText(ruta)) is { } g && g.Version == VersionApp)
+                foreach (var n in g.Nominas) Nominas[(n.Ruta, n.Tamano, n.Fecha, n.ConOcr)] = (n.Nomina, []);
+        }
+        catch { } // la primera vez no hay nada guardado
+    }
+
+    // Se guardan a los pocos segundos de leer una nueva: una pasada lee decenas, y así se escribe una vez cada tanto.
+    static readonly System.Threading.Timer guardarNominas = new(_ => GuardarNominas());
+    static int nominasPorGuardar;
+
+    static void GuardarNominasPronto()
+    {
+        if (ArchivoNominas is not null && Interlocked.Exchange(ref nominasPorGuardar, 1) == 0) guardarNominas.Change(3000, Timeout.Infinite);
+    }
+
+    internal static void GuardarNominas()
+    {
+        Interlocked.Exchange(ref nominasPorGuardar, 0);
+        if (ArchivoNominas is not { } ruta) return;
+        try
+        {
+            // Solo las que se leyeron sin avisos: una hoja que falló (el OCR, la red) se prueba de nuevo la próxima vez.
+            var json = JsonSerializer.Serialize(new NominasGuardadas(VersionApp, [.. Nominas.Where(n => n.Value.Nomina is not null && n.Value.Avisos.Count == 0)
+                .Select(n => new NominaGuardada(n.Key.Ruta, n.Key.Tamano, n.Key.Fecha, n.Key.ConOcr, n.Value.Nomina!))]));
+            Directory.CreateDirectory(Path.GetDirectoryName(ruta)!);
+            // Como la memoria de lecturas: a un archivo aparte y después a su lugar, para que un corte no lo deje a medias.
+            lock (guardarNominas)
+            {
+                File.WriteAllText(ruta + ".nuevo", json);
+                File.Move(ruta + ".nuevo", ruta, overwrite: true);
+            }
+        }
+        catch { } // es un atajo: sin el archivo, la próxima vez se leen de nuevo
+    }
 
     /// <summary>Cómo escriben a cada uno, por CUIL, los recibos sin firmar del mes, los que arma el estudio con texto: el
     /// «APELLIDO NOMBRE» y el empleador, como en Renglon.Nombre. La nómina de AFIP a veces pone el nombre primero: Separar

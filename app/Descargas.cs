@@ -68,6 +68,11 @@ public static class Descargas
     // El año que lee el OCR no se usa: en las fotos borrosas salió mal en 5 de 440 hojas, con el mes bien leído.
     public static int AnioDe(int mes, DateTime hoy) => mes <= hoy.Month ? hoy.Year : hoy.Year - 1;
 
+    // Desde cuándo se cuenta el año de un recibo: hoy, o la fecha del archivo si es más vieja, porque un recibo no es
+    // posterior a su archivo. Contando desde hoy, en una carpeta con cosas de otros años (la Descargas de Windows) un
+    // recibo de septiembre de 2025 de alguien que sigue trabajando se guardaba en septiembre de 2026.
+    static DateTime Desde(DateTime delArchivo, DateTime hoy) => delArchivo < hoy ? delArchivo : hoy;
+
     // La suma de los bytes de cada archivo, por ruta, tamaño y fecha: comparar es leerlos, y la carpeta se revisa cada pocos
     // segundos mientras se leen las fotos.
     static readonly ConcurrentDictionary<(string, long, DateTime), string> Sumas = new();
@@ -117,6 +122,7 @@ public static class Descargas
         {
             if (e is null) continue; // una foto que todavía no se leyó, o un archivo que no se pudo abrir
             hojas[f.FullName] = e.Hojas.Count;
+            var desde = Desde(f.LastWriteTime, hoy);
             for (var i = 0; i < e.Hojas.Count; i++)
             {
                 var h = new Hallazgo(f.FullName, Clientes.EsPdf(f) ? i + 1 : 0, e.Hojas[i]);
@@ -133,7 +139,7 @@ public static class Descargas
                     sinUbicar.Add(new(h, texto.Trim().Length == 0 ? "no se pudo leer" : "no dice de qué mes es"));
                     continue;
                 }
-                var anio = AnioDe(mes, hoy);
+                var anio = AnioDe(mes, desde);
                 var indice = raizDelAnio(anio) is { } raiz ? await Indice(raiz, mes, anio, ocr, avisar, corte) : [];
                 // Solo por el CUIL: entre todos los clientes, un nombre puede estar en más de una nómina.
                 var deQuien = indice.SelectMany(c => Clientes.DeLaNomina(e.Claves + " " + texto, c.Nomina.Empleados.Select(x => x.Cuil))
@@ -185,24 +191,77 @@ public static class Descargas
             .ThenBy(a => a.Recibo.Archivo).ToList(), sinUbicar, completos, porLeer, avisos.ToList());
     }
 
+    /// <summary>Lo que no se ubicó de un archivo («suyas»: sus hojas sin ubicar), en pocas palabras: de una sola hoja, por
+    /// qué; de varias, si ninguna se ubicó, solo cuántas; si otras sí se ubicaron, cuáles no y por qué.</summary>
+    // Con la carpeta de descargas de Windows, llena de cualquier cosa, el panel listaba una por una las 170 hojas de cada extracto.
+    public static string PorQueNo(Bandeja b, IReadOnlyList<SinUbicar> suyas)
+    {
+        var archivo = suyas[0].Hoja.Ruta;
+        var porQue = string.Join("; ", suyas.Select(u => u.PorQue).Distinct());
+        if (b.Acomodos.Any(a => a.Recibo.Hojas.Any(h => h.Ruta.Equals(archivo, StringComparison.OrdinalIgnoreCase))))
+            return $"{QueHojas(suyas.Select(u => u.Hoja.Hoja))} · {porQue}";
+        return suyas.Count == 1 ? porQue : $"ningún recibo identificado en {suyas.Count} hojas";
+    }
+
+    // «hoja 3», «hojas 3 y 5», «hojas 1 a 4 y 7»: tres seguidas o más van como tramo.
+    static string QueHojas(IEnumerable<int> numeros)
+    {
+        var n = numeros.Distinct().Order().ToList();
+        var partes = new List<string>();
+        for (var i = 0; i < n.Count; i++)
+        {
+            var j = i;
+            while (j + 1 < n.Count && n[j + 1] == n[j] + 1) j++;
+            if (j - i >= 2)
+            {
+                partes.Add($"{n[i]} a {n[j]}");
+                i = j;
+            }
+            else partes.Add($"{n[i]}");
+        }
+        var lista = partes.Count == 1 ? partes[0] : $"{string.Join(", ", partes.SkipLast(1))} y {partes[^1]}";
+        return n.Count == 1 ? $"hoja {lista}" : $"hojas {lista}";
+    }
+
+    // Las palabras que trae un recibo de sueldo y casi ningún otro papel. «RECIBO» no: está en «recibida», y en las fotos el
+    // título grande se lee poco (en 35 de 234 recibos). Tampoco «PERIODO», «NETO» o «DESCUENTO», que trae una factura.
+    static readonly string[] DeRecibo = ["EMPLEAD", "OBRA SOC", "SUELDO", "REMUNER", "JUBIL", "APORTE", "SINDIC", "ANTIGUE", "LEGAJO", "CUIL"];
+
+    /// <summary>Una hoja que claramente no es un recibo: se leyó bien (60 palabras o más) y no trae ninguna palabra de recibo.
+    /// No vale la pena leerla a fondo.</summary>
+    // Con la carpeta de descargas de Windows, llena de escaneos de cualquier cosa, la lectura a fondo pasaba horas en ellos (18 a
+    // 34 s por hoja en la VM). Medido el 22/11/2026 con la lectura rápida de las 586 hojas de las muestras: no saltea ninguno de
+    // los 234 recibos firmados leídos con OCR (el que menos palabras de recibo tiene trae tres; el más corto, 113 palabras), y sí
+    // una carta, una factura y un extracto pasados a foto. Con menos de 60 palabras (una foto que casi no se leyó) va a fondo igual.
+    internal static bool NoEsRecibo(string texto)
+    {
+        var n = Regex.Replace(Clientes.Normal(texto), @"\s+", " ");
+        return Regex.Matches(n, "[A-Z]{3,}").Count >= 60 && !DeRecibo.Any(n.Contains);
+    }
+
     /// <summary>La segunda pasada: lee a fondo las hojas que no se pudieron ubicar (las fotos y los escaneos), buscando los
     /// CUIL de las nóminas de su mes. Después hay que revisar de nuevo, que sale de la memoria. Devuelve cuántas leyó.</summary>
     public static async Task<int> Profundizar(Bandeja b, Func<int, string?> raizDelAnio, DateTime hoy, Ocr? ocr, LeerImagen aFondo, Memoria memoria,
         Action<string> avisar, CancellationToken corte, SacarHuella? huella = null)
     {
         // Las que una lectura mejor puede ubicar: sin el CUIL o sin el mes a la vista. Una constancia, o un CUIL que está en
-        // dos nóminas, no se arreglan leyendo mejor.
+        // dos nóminas, no se arreglan leyendo mejor; lo que claramente no es un recibo, tampoco.
         var hojas = b.SinUbicar.Where(s => (s.PorQue.StartsWith("no encontré su CUIL") || s.PorQue is "no dice de qué mes es" or "no se pudo leer")
-            && !s.Hoja.Lectura.AFondo && (s.Hoja.Lectura.Ocr || s.Hoja.Lectura.Texto.Trim().Length == 0 || Clientes.SeCorrige(s.Hoja))).Select(s => s.Hoja).ToList();
+            && !s.Hoja.Lectura.AFondo && (s.Hoja.Lectura.Ocr || s.Hoja.Lectura.Texto.Trim().Length == 0 || Clientes.SeCorrige(s.Hoja))
+            && !NoEsRecibo(s.Hoja.Lectura.Texto)).Select(s => s.Hoja).ToList();
         if (hojas.Count == 0) return 0;
-        // A quién se busca: los de la nómina de su mes, en todos los clientes; si no se leyó el mes, los de este mes y el
-        // anterior. Las nóminas se leen antes: adentro de la lectura a fondo las hojas van de a varias a la vez.
-        async Task<List<string>> DeLosClientes(int mes) => raizDelAnio(AnioDe(mes, hoy)) is { } raiz
-            ? (await Indice(raiz, mes, AnioDe(mes, hoy), ocr, avisar, corte)).SelectMany(c => c.Nomina.Empleados.Select(e => e.Cuil)).ToList() : [];
+        // A quién se busca: los de la nómina de su mes, en todos los clientes; si no se leyó el mes, los del mes de su
+        // archivo (ver Desde) y el anterior. Las nóminas se leen antes: adentro de la lectura a fondo las hojas van de a
+        // varias a la vez.
+        async Task<List<string>> DeLosClientes(int mes, DateTime desde) => raizDelAnio(AnioDe(mes, desde)) is { } raiz
+            ? (await Indice(raiz, mes, AnioDe(mes, desde), ocr, avisar, corte)).SelectMany(c => c.Nomina.Empleados.Select(e => e.Cuil)).ToList() : [];
         var buscados = new Dictionary<(string, int), List<string>>();
         foreach (var h in hojas)
-            buscados[(h.Ruta, h.Hoja)] = Clientes.MesDelRecibo(h.Lectura.Texto) is { } mes ? await DeLosClientes(mes)
-                : [.. await DeLosClientes(hoy.Month), .. await DeLosClientes(hoy.AddMonths(-1).Month)];
+        {
+            var desde = Desde(File.GetLastWriteTime(h.Ruta), hoy);
+            buscados[(h.Ruta, h.Hoja)] = Clientes.MesDelRecibo(h.Lectura.Texto) is { } mes ? await DeLosClientes(mes, desde)
+                : [.. await DeLosClientes(desde.Month, desde), .. await DeLosClientes(desde.AddMonths(-1).Month, desde)];
+        }
         await Clientes.ProfundizarHojas(hojas, h => buscados[(h.Ruta, h.Hoja)], b.Carpeta, aFondo, memoria, avisar, corte, huella);
         return hojas.Count;
     }

@@ -64,6 +64,7 @@ public partial class Ventana : Window
     {
         startupFiles = files;
         InitializeComponent();
+        Clientes.ArchivoNominas = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName, "nominas.json");
         IniciarClientes();
         IniciarDescargas();
 

@@ -153,6 +153,9 @@ tenga su recibo firmado en «RECIBOS FIRMADOS <MES>».
 - Lo leído se recuerda: la segunda revisión lee solo lo nuevo. Y lo que ya pasó
   por la lectura a fondo no se vuelve a intentar, tampoco en una copia del mismo
   archivo con otro nombre.
+- Las nóminas leídas también quedan guardadas en esa PC, para las tres pestañas.
+  Si el estudio cambia una (otra fecha de modificación u otro tamaño) o agrega
+  otra, se lee de nuevo.
 - La carpeta de los clientes se elige una sola vez y queda guardada en esa PC. Si
   su ruta nombra el año, al pasar a otro año la app busca la del año nuevo. Para
   elegir otra, la carpetita de la barra del mes; al pasar por encima dice cuál se
@@ -207,15 +210,22 @@ los PDF). La carpeta se elige una vez con la carpetita de arriba, y la flecha en
 círculo la vuelve a mirar.
 
 - Lee cada archivo y encuentra de qué cliente, mes y empleado es cada recibo: el
-  mes, por el período del recibo; el cliente y el empleado, por el CUIL en las
-  nóminas de ese mes de todos los clientes. Solo por el CUIL: entre todos los
-  clientes, un mismo apellido puede estar en más de una nómina.
+  mes, por el período del recibo; el año, el último en que pasó ese mes antes de
+  la fecha del archivo (un recibo de septiembre bajado el año pasado no va a
+  septiembre de este año); el cliente y el empleado, por el CUIL en las nóminas
+  de ese mes de todos los clientes. Solo por el CUIL: entre todos los clientes, un
+  mismo apellido puede estar en más de una nómina.
 - Aparecen solo los clientes con recibos encontrados. Al tocar uno, el panel
   muestra sus recibos por mes, cada uno con el nombre con que se guardará y su
   vista previa, derecha y con contraste.
 - Lo que no se sabe de quién es (no se lee el CUIL, no dice el mes, es una
   constancia de ARCA) aparece en «REVISAR», con su vista previa y el motivo, y
-  queda en la carpeta como está.
+  queda en la carpeta como está. De un archivo de varias hojas sin ningún recibo
+  (un extracto, una factura) dice solo eso: «ningún recibo identificado en 170
+  hojas».
+- Una hoja que se leyó bien y no trae ninguna palabra de un recibo de sueldo
+  (empleado, obra social, CUIL…) no pasa por la lectura a fondo, que es la
+  lenta: con una carpeta llena de otros papeles, eso ahorra horas.
 - Con «Guardar», cada recibo queda en los firmados de su cliente y su mes (si
   esa carpeta no está, se crea), con el CUIL y el período adentro, así la pestaña
   Clientes lo cuenta. Los originales pasan a «Acomodados», una carpeta adentro de

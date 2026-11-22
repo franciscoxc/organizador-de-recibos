@@ -345,9 +345,9 @@ public partial class Ventana
             {
                 foreach (var g in grupos)
                 {
-                    var hojas = g.First().Hoja.Hoja > 0 ? $", hoja {string.Join(", ", g.Select(u => u.Hoja.Hoja))}" : "";
-                    var (linea, _, _) = LineaPlan($"{Path.GetFileName(g.Key)}{hojas} · {string.Join("; ", g.Select(u => u.PorQue).Distinct())}", g.Key);
-                    lista.Add(ConPrevia(linea, Hojas(g.Select(u => u.Hoja).ToList()), aire: 0));
+                    var suyas = g.ToList();
+                    var (linea, _, _) = LineaPlan($"{Path.GetFileName(g.Key)} · {Descargas.PorQueNo(b, suyas)}", g.Key);
+                    lista.Add(ConPrevia(linea, Hojas(suyas.Select(u => u.Hoja).ToList()), aire: 0));
                 }
             });
             // «Abrir la carpeta», la de descargas: para acomodarlos a mano.
