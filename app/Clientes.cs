@@ -74,7 +74,8 @@ public record ASuMes(Empleado Empleado, int Mes, int Anio, string Archivo, strin
     public string? Ruta => Carpeta is null ? null : Path.Combine(Carpeta, Archivo);
 }
 
-public enum Accion { Carpeta, Corregido, Iniciales, Consolidado, Lista, ASuMes }
+// Acomodar: el original de la carpeta de descargas pasa a «Acomodados», una vez guardados sus recibos (ver Descargas).
+public enum Accion { Carpeta, Corregido, Iniciales, Consolidado, Lista, ASuMes, Acomodar }
 
 public record Escritura(Accion Accion, string Ruta, Empleado? Empleado, List<Hallazgo> Hojas);
 
@@ -219,12 +220,12 @@ public static class Clientes
         .Where(l => Contiene(l, "LIQUIDACION")).SelectMany(Subcarpetas)
         .FirstOrDefault(m => EsDelMes(Path.GetFileName(m), mes, anio));
 
-    static bool EsPdf(FileInfo f) => f.Extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase);
-    static bool EsImagen(FileInfo f) => Imagenes.Contains(f.Extension.ToLowerInvariant());
+    internal static bool EsPdf(FileInfo f) => f.Extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+    internal static bool EsImagen(FileInfo f) => Imagenes.Contains(f.Extension.ToLowerInvariant());
     static bool EsNomina(FileInfo f) => EsPdf(f) && Normal(f.Name).Contains("NOMINA");
 
     // Sin los ocultos ni los del sistema (Thumbs.db), y sin frenarse en una subcarpeta sin permiso.
-    static List<FileInfo> Archivos(string carpeta)
+    internal static List<FileInfo> Archivos(string carpeta)
     {
         try { return new DirectoryInfo(carpeta).EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true }).ToList(); }
         catch { return []; }
@@ -315,6 +316,13 @@ public static class Clientes
 
     // El período de un recibo, «mm/aaaa» suelto («PERIODO DE PAGO 09/2026»). Una fecha entera («01/09/2026») no cuenta.
     static readonly Regex Periodos = new(@"(?<![\d/.,])(0?[1-9]|1[0-2])\s?/\s?(20\d{2})(?![\d/])", RegexOptions.Compiled);
+
+    /// <summary>El mes de un recibo: el período que más se repite en el texto. null si no trae ninguno.</summary>
+    public static int? MesDelRecibo(string texto)
+    {
+        var meses = Periodos.Matches(texto).Select(m => int.Parse(m.Groups[1].Value)).ToList();
+        return meses.Count == 0 ? null : meses.GroupBy(m => m).MaxBy(g => g.Count())!.Key;
+    }
 
     /// <summary>Si el texto es de un recibo de otro mes, de cuál: trae algún período y ninguno es el del mes que se
     /// revisa. Sin ningún período a la vista devuelve null: no se sabe, y la hoja cuenta como siempre.</summary>
@@ -457,7 +465,7 @@ public static class Clientes
     // certificados, que no son recibos y tardarían en leerse.
     // «unaVez» lee la hoja o devuelve lo ya leído de una imagen igual; «falta» avisa de cada hoja que queda sin leer por
     // no haber OCR en esta pasada.
-    static async Task<Memoria.Entrada?> Leer(FileInfo f, bool firmado, LeerImagen? leer, Memoria memoria, Func<string, bool> buscado, Action<string> avisar, CancellationToken corte,
+    internal static async Task<Memoria.Entrada?> Leer(FileInfo f, bool firmado, LeerImagen? leer, Memoria memoria, Func<string, bool> buscado, Action<string> avisar, CancellationToken corte,
         Func<string, int, Func<Task<Lectura>>, Task<Lectura>>? unaVez = null, Action? falta = null)
     {
         if (memoria.Buscar(f) is { } guardada) return guardada;
@@ -559,21 +567,8 @@ public static class Clientes
         var ilegibles = new List<Hallazgo>();
         var ajenos = new List<(Hallazgo Hoja, int Mes, string Claves, int Hojas, bool PorConfirmar)>();
 
-        // La misma imagen en dos archivos, o repetida adentro de un PDF, pasa por el OCR una sola vez: si ya está leída en
-        // la carpeta se toma esa lectura, y si se está leyendo ahora, se la espera. En octubre de 2026 un cliente tenía
-        // 125 hojas para el OCR y solo 38 imágenes distintas (las mismas fotos bajadas varias veces y juntadas en PDF).
         var porLeer = 0;
-        var enCurso = new ConcurrentDictionary<string, Lazy<Task<Lectura>>>();
-        async Task<Lectura> UnaVez(string ruta, int hoja, Func<Task<Lectura>> leerla)
-        {
-            string? h = null;
-            // Con Task.Run: sacar la huella es dibujar la hoja, y sin él cada una se dibujaba antes de lanzar la siguiente.
-            try { h = await Task.Run(() => huella!(ruta, hoja), corte); }
-            catch (Exception e) when (e is not OperationCanceledException) { } // sin huella, se lee como siempre
-            if (h is null) return await leerla();
-            if (memoria.ConHuella(carpetaMes, h) is { } igual) return igual;
-            return await enCurso.GetOrAdd(h, _ => new Lazy<Task<Lectura>>(async () => (await leerla()) with { Huella = h })).Value;
-        }
+        var unaVez = huella is null ? null : UnaVez(huella, memoria, carpetaMes, corte);
 
         // De a varios archivos a la vez, uno por núcleo: el OCR de una foto usa uno solo, y de a uno la primera
         // revisión dejaba ocioso el resto del procesador (25 % en una PC de cuatro). Después se recorren en orden.
@@ -586,11 +581,12 @@ public static class Clientes
                 try
                 {
                     leidos[i] = await Leer(lista[i], EnFirmados(lista[i]), leer, memoria, Buscado, m => avisar($"{nombre}: {m}"), corte,
-                        huella is null ? null : UnaVez, () => Interlocked.Increment(ref porLeer));
+                        unaVez, () => Interlocked.Increment(ref porLeer));
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException) { errores[i] = $"{lista[i].Name}: {ex.Message}"; }
             });
         avisos.AddRange(errores.OfType<string>());
+        if (huella is not null) await CompletarHuellas(lista, leidos, memoria, huella, corte);
         // Cómo nombran al empleador los recibos con texto (los que arma el estudio): así está escrito también en las fotos.
         var empleador = string.Join(" ", leidos.SelectMany(e => e?.Hojas ?? []).Select(l => l.Empleador).Distinct());
         foreach (var (f, e) in lista.Zip(leidos))
@@ -677,6 +673,48 @@ public static class Clientes
         return new(nombre, mes, anio, carpetaMes, nomina, destino, renglones, ilegibles, avisos) { PorLeer = porLeer, OtrosMeses = otros, ALlevar = llevar };
     }
 
+    /// <summary>Lee cada imagen una sola vez: si ya está leída adentro de «carpeta» (por su huella) se toma esa lectura, y
+    /// si se está leyendo ahora, se la espera.</summary>
+    // En octubre de 2026 un cliente tenía 125 hojas para el OCR y solo 38 imágenes distintas (las mismas fotos bajadas varias
+    // veces y juntadas en PDF).
+    internal static Func<string, int, Func<Task<Lectura>>, Task<Lectura>> UnaVez(SacarHuella huella, Memoria memoria, string carpeta, CancellationToken corte)
+    {
+        var enCurso = new ConcurrentDictionary<string, Lazy<Task<Lectura>>>();
+        return async (ruta, hoja, leerla) =>
+        {
+            string? h = null;
+            // Con Task.Run: sacar la huella es dibujar la hoja, y sin él cada una se dibujaba antes de lanzar la siguiente.
+            try { h = await Task.Run(() => huella(ruta, hoja), corte); }
+            catch (Exception e) when (e is not OperationCanceledException) { } // sin huella, se lee como siempre
+            if (h is null) return await leerla();
+            if (memoria.ConHuella(carpeta, h) is { } igual) return igual;
+            return await enCurso.GetOrAdd(h, _ => new Lazy<Task<Lectura>>(async () => (await leerla()) with { Huella = h })).Value;
+        };
+    }
+
+    // Lo leído antes de que existiera la huella no la tiene: se le saca ahora, una vez (unos 15 ms por hoja), y queda en la
+    // memoria. Sin ella, las copias de esas hojas no se reconocían: en un cliente de octubre de 2026, el PDF corregido de una
+    // empleada llevaba 9 hojas para una liquidación de 2.
+    internal static async Task CompletarHuellas(List<FileInfo> archivos, Memoria.Entrada?[] leidos, Memoria memoria, SacarHuella huella, CancellationToken corte)
+    {
+        await Parallel.ForEachAsync(Enumerable.Range(0, archivos.Count), new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = corte },
+            async (i, _) =>
+            {
+                if (leidos[i] is not { } e) return;
+                for (var hoja = 0; hoja < e.Hojas.Count; hoja++)
+                {
+                    if (e.Hojas[hoja] is not { Ocr: true, Huella: null } l) continue;
+                    string? h = null;
+                    var numero = EsPdf(archivos[i]) ? hoja + 1 : 0;
+                    try { h = await Task.Run(() => huella(archivos[i].FullName, numero), corte); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { } // sin huella, sigue como estaba
+                    if (h is null) continue;
+                    e.Hojas[hoja] = l with { Huella = h };
+                    memoria.Reemplazar(archivos[i], hoja, e.Hojas[hoja]);
+                }
+            });
+    }
+
     /// <summary>El año de un recibo de otro mes: el que lo deja más cerca del mes que se revisa (septiembre, revisando
     /// octubre de 2026, es de 2026; diciembre, revisando enero de 2027, es de 2026). A igual distancia, el pasado.</summary>
     // El año que lee el OCR no se usa: en las fotos borrosas salió mal en 5 de 440 hojas, con el mes bien leído.
@@ -684,6 +722,14 @@ public static class Clientes
     {
         var antes = (mes - suMes + 12) % 12; // cuántos meses atrás queda
         return antes <= 6 ? (suMes <= mes ? anio : anio - 1) : (suMes > mes ? anio : anio + 1);
+    }
+
+    /// <summary>Los firmados de un mes: si hay más de una carpeta, la que nombra el mes; si no hay ninguna, la que se
+    /// crearía («RECIBOS FIRMADOS SEPTIEMBRE»).</summary>
+    internal static string FirmadosDelMes(string carpetaMes, int mes)
+    {
+        var hay = Subcarpetas(carpetaMes).Where(EsDeFirmados).ToList();
+        return hay.FirstOrDefault(c => Contiene(c, Meses[mes - 1])) ?? hay.FirstOrDefault() ?? Path.Combine(carpetaMes, $"RECIBOS FIRMADOS {Meses[mes - 1]}");
     }
 
     // De quién es cada recibo de otro mes y adónde iría: los firmados de su mes, con el nombre que les pone la revisión de
@@ -707,11 +753,7 @@ public static class Clientes
             var sinFirmar = suNomina is null ? [] : RecibosSinFirmar(suCarpeta!, quienes);
             string Nombre(Empleado x) => Recibos.SinComa(sinFirmar.GetValueOrDefault(x.Cuil)?.Nombre
                 ?? renglones.FirstOrDefault(y => y.Empleado.Cuil == x.Cuil)?.Nombre ?? x.Nombre);
-            // Si hay más de una carpeta de firmados, la que nombra el mes; si no hay, la que se crearía.
-            var susFirmados = suCarpeta is null ? [] : Subcarpetas(suCarpeta).Where(EsDeFirmados).ToList();
-            var firmados = suCarpeta is null ? null
-                : susFirmados.FirstOrDefault(c => Contiene(c, Meses[suMes - 1])) ?? susFirmados.FirstOrDefault()
-                  ?? Path.Combine(suCarpeta, $"RECIBOS FIRMADOS {Meses[suMes - 1]}");
+            var firmados = suCarpeta is null ? null : FirmadosDelMes(suCarpeta, suMes);
             var hojas = new Dictionary<string, (Empleado Empleado, List<Hallazgo> Hojas, bool PorNombre)>();
             var paginas = new List<(Hallazgo Hoja, List<string> Cuils, bool PorConfirmar)>();
             foreach (var a in delMes)
@@ -769,7 +811,16 @@ public static class Clientes
         var porNombre = r.Renglones.Where(x => x.Firma == Firma.PorNombre)
             .SelectMany(x => x.Firmado.Select(h => (Clave: (h.Ruta, h.Hoja), x.Empleado.Cuil))).ToLookup(t => t.Clave, t => t.Cuil);
         var hojas = Dificiles(r);
-        List<string> Buscados(Hallazgo h) => porNombre.Contains((h.Ruta, h.Hoja)) ? porNombre[(h.Ruta, h.Hoja)].ToList() : cuils;
+        await ProfundizarHojas(hojas, h => porNombre.Contains((h.Ruta, h.Hoja)) ? porNombre[(h.Ruta, h.Hoja)].ToList() : cuils, r.CarpetaMes,
+            aFondo, memoria, avisar, corte, huella);
+        return hojas.Count;
+    }
+
+    /// <summary>Lee a fondo esas hojas, cada imagen una sola vez, buscando a los de «buscados», y deja lo leído en la
+    /// memoria. «carpeta»: donde se busca si la misma imagen ya se leyó a fondo en otro archivo.</summary>
+    internal static async Task ProfundizarHojas(List<Hallazgo> hojas, Func<Hallazgo, List<string>> Buscados, string? carpeta, LeerImagen aFondo,
+        Memoria memoria, Action<string> avisar, CancellationToken corte, SacarHuella? huella)
+    {
         // Las hojas con texto propio llegan sin huella (la lectura rápida no las dibuja): se saca acá, para que la copia de
         // un PDF que ya se leyó a fondo se reconozca y no se lea otra vez.
         var sacadas = new ConcurrentDictionary<(string, int), string>();
@@ -790,7 +841,7 @@ public static class Clientes
                 var buscados = Buscados(h);
                 // La que ya se leyó a fondo en otro archivo de la carpeta (la misma imagen) no se lee de nuevo: lo que salió
                 // de ahí es lo mejor que se pudo sacar.
-                var yaLeida = HuellaDe(h) is { } suHuella && r.CarpetaMes is { } carpeta && memoria.ConHuella(carpeta, suHuella) is { AFondo: true } igual ? igual : null;
+                var yaLeida = HuellaDe(h) is { } suHuella && carpeta is not null && memoria.ConHuella(carpeta, suHuella) is { AFondo: true } igual ? igual : null;
                 var l = yaLeida;
                 if (l is null)
                 {
@@ -809,7 +860,6 @@ public static class Clientes
                     memoria.Reemplazar(new FileInfo(copia.Ruta), Math.Max(0, copia.Hoja - 1), suya with { AFondo = true, Huella = HuellaDe(copia) });
                 }
             });
-        return hojas.Count;
     }
 
     static string Archivo(string carpeta, Renglon x, Revision r) => Path.Combine(carpeta, Recibos.NombreArchivo(x.Nombre, r.Mes, r.Anio.ToString()));
@@ -1039,17 +1089,17 @@ public static class Clientes
         var porNombre = llevado?.PorNombre ?? r.Renglones.Any(x => x.Empleado == e.Empleado && x.Firma == Firma.PorNombre);
         b.DocumentInformation.Keywords = $"{e.Empleado!.Cuil} {llevado?.Mes ?? r.Mes:00}/{llevado?.Anio ?? r.Anio}" + (e.Accion == Accion.Iniciales ? " iniciales" : "")
             + (porNombre ? " por nombre" : "");
+        if (e.Accion is Accion.Corregido or Accion.ASuMes)
+        {
+            await EscribirCorregido(e.Ruta, b.DocumentInformation.Keywords, e.Hojas, corregir);
+            return;
+        }
         var docs = new Dictionary<string, PdfDocument>(StringComparer.OrdinalIgnoreCase);
         try
         {
             PdfDocumentBuilder.AddedFont? fuente = null;
             foreach (var h in e.Hojas)
             {
-                if (e.Accion is Accion.Corregido or Accion.ASuMes)
-                {
-                    await HojaCorregida(b, h, corregir);
-                    continue;
-                }
                 // Las iniciales: una copia de la hoja sin firmar, con las del estudio en el espacio de la firma. El
                 // original se abre solo para leer.
                 if (!docs.TryGetValue(h.Ruta, out var doc)) docs[h.Ruta] = doc = PdfDocument.Open(h.Ruta);
@@ -1067,6 +1117,16 @@ public static class Clientes
         {
             foreach (var d in docs.Values) d.Dispose();
         }
+    }
+
+    /// <summary>Un PDF nuevo con esas hojas derechas y con contraste, y esas palabras clave (el CUIL y el período, para que la
+    /// revisión lo encuentre sin OCR). Nunca pisa: si ya hay un archivo con ese nombre, falla.</summary>
+    internal static async Task EscribirCorregido(string ruta, string claves, IEnumerable<Hallazgo> hojas, Corregir corregir)
+    {
+        var b = new PdfDocumentBuilder();
+        b.DocumentInformation.Keywords = claves;
+        foreach (var h in hojas) await HojaCorregida(b, h, corregir);
+        await Recibos.GuardarNuevo(ruta, b.Build());
     }
 
     // Entera, centrada y con un margen chico, en una hoja A4 parada o acostada como la foto.

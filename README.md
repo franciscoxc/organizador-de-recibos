@@ -6,7 +6,8 @@ Organizador de Recibos es una app para Windows que toma los PDF con los recibos
 de sueldo de todos los empleados juntos y los separa: un PDF por empleado y por
 mes. Con la nómina de AFIP, revisa además que no falte el recibo de nadie, y en
 la pestaña Clientes revisa de una vez los recibos firmados de todos los clientes
-del estudio.
+del estudio. En la pestaña Descargas acomoda en su lugar los recibos firmados que
+se bajan, de cualquier cliente y como vengan.
 
 ## Qué deja
 
@@ -197,6 +198,34 @@ consolidado, al completarlo: lo arma aparte y recién entero ocupa el lugar del
 anterior, así que si algo falla queda el que había. Fuera de eso, si ya existe un
 archivo con ese nombre, lo deja como está. Mientras guarda, la ventana no se cierra: espera a
 terminar, para no dejar un archivo a medio escribir.
+
+## Acomodar las descargas
+
+En la pestaña **Descargas**, la app mira una carpeta de esta PC donde se bajan,
+como vengan, los recibos firmados de cualquier cliente (las fotos de WhatsApp,
+los PDF). La carpeta se elige una vez con la carpetita de arriba, y la flecha en
+círculo la vuelve a mirar.
+
+- Lee cada archivo y encuentra de qué cliente, mes y empleado es cada recibo: el
+  mes, por el período del recibo; el cliente y el empleado, por el CUIL en las
+  nóminas de ese mes de todos los clientes. Solo por el CUIL: entre todos los
+  clientes, un mismo apellido puede estar en más de una nómina.
+- Aparecen solo los clientes con recibos encontrados. Al tocar uno, el panel
+  muestra sus recibos por mes, cada uno con el nombre con que se guardará y su
+  vista previa, derecha y con contraste.
+- Lo que no se sabe de quién es (no se lee el CUIL, no dice el mes, es una
+  constancia de ARCA) aparece en «REVISAR», con su vista previa y el motivo, y
+  queda en la carpeta como está.
+- Con «Guardar», cada recibo queda en los firmados de su cliente y su mes (si
+  esa carpeta no está, se crea), con el CUIL y el período adentro, así la pestaña
+  Clientes lo cuenta. Los originales pasan a «Acomodados», una carpeta adentro de
+  la de descargas: nada se borra. Un archivo con alguna hoja sin ubicar queda
+  donde está.
+- Si un recibo ya está en su carpeta, porque se guardó antes con su nombre o
+  porque el mismo archivo ya estaba ahí con otro nombre, no se guarda otra vez:
+  su original pasa directo a «Acomodados».
+- La misma foto bajada varias veces se lee una sola vez, y la carpeta se puede
+  revisar seguido: lo leído se recuerda.
 
 ## Descargar
 

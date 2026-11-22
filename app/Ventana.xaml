@@ -54,7 +54,7 @@
     <Grid>
         <StackPanel x:Name="todo" Margin="20,10,20,20">
             <Grid>
-            <!-- Arriba a la izquierda, las dos tareas: la pastilla viaja de una a la otra y la vista nueva entra
+            <!-- Arriba a la izquierda, las tres tareas: la pastilla viaja de una a la otra y la vista nueva entra
                  por su lado. «Clientes» y no «Revisar clientes»: con la flecha estirada en «Reiniciar para
                  actualizar», el nombre largo no entra en la fila. -->
             <Border HorizontalAlignment="Left" VerticalAlignment="Center" CornerRadius="16" Padding="2"
@@ -74,6 +74,10 @@
                         </Button>
                         <Button x:Name="verClientes" Style="{StaticResource Llano}" AutomationProperties.Name="Revisar los clientes">
                             <TextBlock x:Name="verClientesTexto" Text="Clientes" Margin="14,5,14,6" FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        </Button>
+                        <Button x:Name="verDescargas" Style="{StaticResource Llano}" AutomationProperties.Name="Acomodar las descargas">
+                            <TextBlock x:Name="verDescargasTexto" Text="Descargas" Margin="14,5,14,6" FontSize="13" FontWeight="SemiBold"
                                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         </Button>
                     </StackPanel>
@@ -253,7 +257,12 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <Grid>
+                <!-- Dos páginas en el mismo lugar, la de Clientes y la de Descargas: comparten el panel de la derecha y el
+                     alto, y al cambiar de pestaña la nueva empuja a la otra. -->
+                <Grid x:Name="paginaClientes">
+                <Grid.RenderTransform>
+                    <TranslateTransform x:Name="paginaClientesCorrida"/>
+                </Grid.RenderTransform>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -311,7 +320,7 @@
 
                 <Grid Grid.Row="2" Margin="0,6,0,0">
                     <ScrollViewer x:Name="clientesDesplazar" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <Canvas x:Name="clientesFilas" Height="0"/>
+                        <Canvas x:Name="clientesFilas" Height="0" VerticalAlignment="Top"/>
                     </ScrollViewer>
                     <!-- Los bordes toman sombra recién cuando hay renglones que pasan por debajo: arriba si se bajó la
                          lista, abajo si sigue más allá del letrero. -->
@@ -415,6 +424,114 @@
                 </Grid>
                 </Grid>
 
+                <!-- Descargas: la carpeta de esta PC donde se bajan, como vengan, los recibos de cualquier cliente. Solo
+                     aparecen los clientes con recibos encontrados, y «REVISAR» con lo que no se sabe de quién es. -->
+                <Grid x:Name="paginaDescargas" Visibility="Collapsed">
+                <Grid.RenderTransform>
+                    <TranslateTransform x:Name="paginaDescargasCorrida"/>
+                </Grid.RenderTransform>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Como la barra del mes: el nombre de la carpeta, y a la derecha buscar de nuevo y elegir otra carpeta, en
+                     el mismo lugar que en Clientes. -->
+                <Grid Height="46" Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="44"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.ColumnSpan="4" CornerRadius="12" BorderThickness="1"
+                            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"/>
+                    <TextBlock x:Name="descargasTitulo" Grid.Column="1" Text="Descargas" FontFamily="{StaticResource Titulos}" FontSize="17"
+                               FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                    <Button x:Name="reDescargas" Grid.Column="2" Style="{StaticResource Icono}" AutomationProperties.Name="Buscar de nuevo en la carpeta de descargas"
+                            ToolTip="Buscar de nuevo" RenderTransformOrigin="0.5,0.5">
+                        <TextBlock Text="&#xE72C;" FontFamily="{StaticResource Iconos}" FontSize="13" RenderTransformOrigin="0.5,0.5">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform x:Name="reDescargasGiro"/>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Button>
+                    <Button x:Name="cambiarDescargas" Grid.Column="3" Style="{StaticResource Icono}"
+                            AutomationProperties.Name="Elegir la carpeta de descargas" ToolTip="Elegir la carpeta de descargas">
+                        <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource Iconos}" FontSize="14" RenderTransformOrigin="0.5,0.7">
+                            <TextBlock.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="cambiarDescargasEscala"/>
+                                    <RotateTransform x:Name="cambiarDescargasGiro"/>
+                                </TransformGroup>
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Button>
+                </Grid>
+
+                <TextBlock x:Name="descargasEstado" Grid.Row="1" Margin="4,10,4,0" FontSize="12" TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+
+                <Grid Grid.Row="2" Margin="0,6,0,0">
+                    <!-- Arriba: con pocos renglones, el tema de Windows centraba la lista en el medio del lugar. -->
+                    <ScrollViewer x:Name="descargasDesplazar" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <Canvas x:Name="descargasFilas" Height="0" VerticalAlignment="Top"/>
+                    </ScrollViewer>
+                    <!-- Sin carpeta elegida, cómo elegirla; con la carpeta vacía, que no hay nada. -->
+                    <StackPanel x:Name="sinDescargas" VerticalAlignment="Center" Margin="16,0" Visibility="Collapsed">
+                        <TextBlock x:Name="sinDescargasTexto" TextWrapping="Wrap" TextAlignment="Center" FontSize="13"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                        <Button x:Name="elegirDescargas" Content="Elegir la carpeta…" HorizontalAlignment="Center" Margin="0,14,0,0"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Guardar, como en Clientes: abre a la derecha la lista exacta de lo que se va a hacer, y espera el segundo clic. -->
+                <Grid x:Name="guardarDescargasCaja" Grid.Row="3" Margin="0,10,0,0" Opacity="0.4">
+                    <Border CornerRadius="10" Background="{DynamicResource AccentFillColorDefaultBrush}"/>
+                    <Button x:Name="guardarDescargas" Style="{StaticResource Llano}" Height="42" IsEnabled="False"
+                            AutomationProperties.Name="Guardar lo de la carpeta de descargas">
+                        <Grid Background="Transparent">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="&#xE74E;" FontFamily="{StaticResource Iconos}" FontSize="14" Margin="0,1,10,0"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                                <TextBlock x:Name="guardarDescargasTexto" Text="Guardar…" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Button>
+                </Grid>
+
+                <!-- La barra de estado, como la de Clientes: el color va en el círculo. -->
+                <Grid Grid.Row="4" Height="36" Margin="0,10,0,0">
+                    <Border BorderThickness="0,1,0,0" BorderBrush="{DynamicResource DividerStrokeColorDefaultBrush}"/>
+                    <Grid x:Name="descargasCartel" Opacity="0" HorizontalAlignment="Left" Margin="4,1,0,0">
+                        <Grid.RenderTransform>
+                            <TranslateTransform x:Name="descargasCartelAltura"/>
+                        </Grid.RenderTransform>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Grid Width="20" Height="20" Margin="0,0,10,0">
+                                <Ellipse Fill="#616161"/>
+                                <Ellipse x:Name="descargasCartelVerde" Fill="#107C10" Opacity="0"/>
+                                <Ellipse x:Name="descargasCartelAmarillo" Fill="#EBB41C" Opacity="0"/>
+                                <TextBlock x:Name="descargasCartelIcono" FontFamily="{StaticResource Iconos}" FontSize="10" Foreground="White"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                    <TextBlock.RenderTransform>
+                                        <ScaleTransform x:Name="descargasCartelIconoEscala"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </Grid>
+                            <TextBlock x:Name="descargasCartelTexto" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" AutomationProperties.LiveSetting="Polite"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+                </Grid>
+
                 <!-- El panel de la derecha. Crece desde el borde de la lista, con la ventana agrandándose para él, y se
                      guarda por el mismo lado al cerrarlo. -->
                 <Grid x:Name="panel" Grid.Column="1" Width="0" Margin="0,8,0,0" ClipToBounds="True" HorizontalAlignment="Left">
@@ -471,8 +588,8 @@
                             </ScrollViewer>
                             <StackPanel Grid.Row="2" Margin="16,6,16,14">
                                 <StackPanel x:Name="pieGuardar" Visibility="Collapsed">
-                                    <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                               Text="No se borra ningún archivo. Lo que ya existe queda como está; al consolidado que le falta alguien solo se le suman hojas al final."/>
+                                    <!-- Lo dice cada página al abrir su lista: Clientes y Descargas guardan cosas distintas. -->
+                                    <TextBlock x:Name="pieGuardarTexto" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
                                         <Button x:Name="guardarNo" Content="Cancelar" MinWidth="96" Margin="0,0,8,0"/>
                                         <Button x:Name="guardarSi" Content="Guardar" MinWidth="96" Style="{DynamicResource AccentButtonStyle}"/>

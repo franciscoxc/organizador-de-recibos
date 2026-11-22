@@ -65,6 +65,7 @@ public partial class Ventana : Window
         startupFiles = files;
         InitializeComponent();
         IniciarClientes();
+        IniciarDescargas();
 
         // Se ve solo cuando hay una versión nueva; mientras se baja, tocarlo no hace nada.
         actualizar.Click += (_, _) => { if (nuevoExe is not null) Reiniciar(); };
@@ -880,6 +881,12 @@ public partial class Ventana : Window
     {
         AutomationProperties.SetName(actualizar, "Reiniciar para actualizar");
         actualizarTexto.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        // Con las tres pestañas, la frase entera puede no entrar al lado: entonces dice lo justo.
+        if (actualizarTexto.DesiredSize.Width > ((FrameworkElement)actualizar.Parent).ActualWidth - ((FrameworkElement)selector.Parent).ActualWidth - 12)
+        {
+            actualizarTexto.Text = "Reiniciar";
+            actualizarTexto.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        }
         Resorte.Animar((actualizarCaja, "ancho"), actualizarTexto.DesiredSize.Width, v => actualizarCaja.Width = v, desde: 32, rigidez: 260, rebote: 0.15);
         Opacidad(actualizarAcento, 1);
         Opacidad(actualizarTexto, 1);

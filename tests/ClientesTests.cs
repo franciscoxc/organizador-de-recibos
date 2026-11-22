@@ -977,6 +977,30 @@ public class ClientesTests(ITestOutputHelper salida)
     }
 
     [Fact]
+    public async Task Lo_leido_antes_de_la_huella_la_recibe_y_sus_copias_se_reconocen()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var cliente = Cliente(raiz, "PEREZ JUAN", conFirmados: false);
+            var firmados = Firmados(cliente);
+            foreach (var foto in new[] { "gomez.jpeg", "gomez (1).jpeg" }) File.WriteAllBytes(Path.Combine(firmados, foto), [0xFF, 0xD8]);
+            // Las dos leídas con una versión de antes, sin la huella.
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            foreach (var foto in Directory.GetFiles(firmados)) memoria.Anotar(new FileInfo(foto), "", [new Lectura($"CUIL {Gomez.Cuil}", Ocr: true)]);
+            SacarHuella huella = (_, _) => Task.FromResult<string?>("la misma");
+            LeerImagen nadie = (_, _, _) => throw new InvalidOperationException("ya está leída");
+            // Sin la huella, la misma foto va dos veces en su PDF; con ella, una, y queda guardada en la memoria.
+            var r = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None);
+            Assert.Equal(2, Clientes.Planear(r, new HashSet<string>()).Single(e => e.Accion == Accion.Corregido).Hojas.Count);
+            r = await Clientes.Revisar(cliente, 10, 2026, null, null, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Single(Clientes.Planear(r, new HashSet<string>()).Single(e => e.Accion == Accion.Corregido).Hojas);
+            Assert.All(Directory.GetFiles(firmados), foto => Assert.Equal("la misma", memoria.Buscar(new FileInfo(foto))!.Hojas[0].Huella));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
     public async Task La_lectura_a_fondo_lee_una_vez_cada_imagen()
     {
         var raiz = Directory.CreateTempSubdirectory().FullName;
@@ -1211,6 +1235,167 @@ public class ClientesTests(ITestOutputHelper salida)
             Assert.Equal(("GOMEZ LUCIA 09 2026.pdf", (string?)null), (l.Archivo, l.Ruta));
             Assert.DoesNotContain(Clientes.Planear(r, new HashSet<string>(), aSuMes: true), e => e.Accion is Accion.ASuMes or Accion.Carpeta);
             Assert.Single(r.DeOtroMesPendientes);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    // ---- La carpeta de descargas ----
+
+    // Otro cliente, con su carpeta de octubre, su nómina y sus recibos sin firmar.
+    static string OtroCliente(string raiz, string nombre, params Empleado[] empleados)
+    {
+        var mes = Path.Combine(raiz, nombre, "4. SUELDOS Y CARGAS SOCIALES", "1  LIQUIDACIONES DE SUELDOS 2026", $"{nombre} SUELDOS OCTUBRE 2026");
+        Directory.CreateDirectory(Path.Combine(mes, "SUSS Y SIND"));
+        Pdf(Path.Combine(mes, "SUSS Y SIND", $"{nombre} SUSS NOMINA 10 2026.pdf"), Nomina(empleados));
+        Pdf(Path.Combine(mes, $"{nombre} RECIBOS 10 2026.PDF"), empleados.Select(Recibo).ToArray());
+        return Path.Combine(raiz, nombre);
+    }
+
+    [Theory]
+    [InlineData(10, 2026)]
+    [InlineData(11, 2026)] // el del mes que corre
+    [InlineData(12, 2025)] // diciembre, bajado en noviembre: el del año pasado
+    public void El_recibo_bajado_es_del_ultimo_mes_que_paso(int mes, int anio) => Assert.Equal(anio, Descargas.AnioDe(mes, new DateTime(2026, 11, 15)));
+
+    [Fact]
+    public async Task Acomoda_las_descargas_en_su_cliente_y_su_mes_sin_pisar_ni_borrar_nada()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            var perez = Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            var vega = new Empleado("20-12345678-6", "VEGA IRENE");
+            var sosa = OtroCliente(clientes, "SOSA ELENA", vega);
+            // La carpeta de descargas, con lo que se bajó como vino: la foto de Gómez dos veces, la de Vega (de otro cliente),
+            // una que no es de nadie, una sin el mes a la vista y una constancia.
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            var textos = new Dictionary<string, string>
+            {
+                ["foto gomez.jpeg"] = $"CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026",
+                ["foto gomez (1).jpeg"] = $"CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026",
+                ["vega.jpeg"] = $"CUIL {vega.Cuil} PERIODO DE PAGO 10/2026",
+                ["nadie.jpeg"] = "x / ; PERIODO DE PAGO 10/2026",
+                ["sin mes.jpeg"] = $"CUIL {Rojas.Cuil}",
+                ["constancia.jpeg"] = $"CONSTANCIA DEL TRABAJADOR Alta CUIL: {Lopez.Cuil}",
+            };
+            foreach (var foto in textos.Keys) File.WriteAllBytes(Path.Combine(descargas, foto), [0xFF, 0xD8]);
+            File.WriteAllText(Path.Combine(descargas, "notas.txt"), "no es un recibo");
+            var lecturas = 0;
+            LeerImagen leer = (ruta, _, _) =>
+            {
+                Interlocked.Increment(ref lecturas);
+                return Task.FromResult(new Lectura(textos[Path.GetFileName(ruta)], Ocr: true));
+            };
+            // La foto bajada dos veces es la misma imagen.
+            SacarHuella huella = (ruta, _) => Task.FromResult<string?>(Path.GetFileName(ruta).StartsWith("foto gomez") ? "gomez" : Path.GetFileName(ruta));
+            var hoy = new DateTime(2026, 11, 15);
+            string? RaizDelAnio(int anio) => anio == 2026 ? clientes : null;
+            var memoria = new Memoria(Path.Combine(raiz, "memoria.json"));
+            var b = await Descargas.Revisar(descargas, RaizDelAnio, hoy, null, leer, memoria, _ => { }, CancellationToken.None, huella);
+
+            // Seis fotos y cinco imágenes distintas: cinco lecturas. Cada recibo, a su cliente; lo demás, sin ubicar y por qué.
+            Assert.Equal(5, lecturas);
+            Assert.Equal([("PEREZ JUAN", "GOMEZ LUCIA 10 2026.pdf"), ("SOSA ELENA", "VEGA IRENE 10 2026.pdf")],
+                b.Acomodos.Select(a => (Path.GetFileName(a.Cliente), a.Recibo.Archivo)));
+            Assert.Single(b.Acomodos[0].Recibo.Hojas); // la foto repetida, una vez
+            Assert.Equal(["constancia.jpeg: es una constancia de ARCA, no un recibo", "nadie.jpeg: no encontré su CUIL en las nóminas de octubre",
+                "sin mes.jpeg: no dice de qué mes es"], b.SinUbicar.Select(u => $"{Path.GetFileName(u.Hoja.Ruta)}: {u.PorQue}"));
+
+            // Lo de un solo cliente: su carpeta de firmados, su recibo y sus dos originales.
+            var dePerez = Descargas.Planear(b, perez);
+            Assert.Equal([Accion.Carpeta, Accion.ASuMes, Accion.Acomodar, Accion.Acomodar], dePerez.Select(e => e.Accion));
+            // Todo: los dos clientes, y los tres originales que ya tienen adónde ir. Los que no, quedan en la carpeta.
+            var plan = Descargas.Planear(b);
+            Assert.Equal(["foto gomez (1).jpeg", "foto gomez.jpeg", "vega.jpeg"], plan.Where(e => e.Accion == Accion.Acomodar).Select(e => Path.GetFileName(e.Ruta)));
+            Corregir corregir = _ => Task.FromResult((Convert.FromBase64String(Jpeg), 2, 2));
+            foreach (var e in plan) await Descargas.Escribir(e, b, corregir);
+
+            // Cada recibo quedó en los firmados de su cliente y su mes, con el CUIL y el período para la revisión de Clientes.
+            var gomezEnZ = Path.Combine(Mes(perez), "RECIBOS FIRMADOS OCTUBRE", "GOMEZ LUCIA 10 2026.pdf");
+            using (var doc = PdfDocument.Open(gomezEnZ)) Assert.Equal($"{Gomez.Cuil} 10/2026", doc.Information.Keywords);
+            Assert.True(File.Exists(Path.Combine(Mes(sosa), "RECIBOS FIRMADOS OCTUBRE", "VEGA IRENE 10 2026.pdf")));
+            LeerImagen nadieLee = (_, _, _) => throw new InvalidOperationException("no debería leer nada");
+            var octubre = await Clientes.Revisar(perez, 10, 2026, null, nadieLee, new Memoria(Path.Combine(raiz, "octubre.json")), _ => { }, CancellationToken.None);
+            Assert.Equal(Firma.Firmado, octubre.Renglones[0].Firma);
+            // Los originales están en «Acomodados»; lo que no se pudo ubicar sigue en la carpeta, como estaba.
+            var acomodados = Path.Combine(descargas, Descargas.Acomodados);
+            Assert.Equal(["foto gomez (1).jpeg", "foto gomez.jpeg", "vega.jpeg"], Directory.GetFiles(acomodados).Select(Path.GetFileName).Order());
+            Assert.Equal(["constancia.jpeg", "nadie.jpeg", "notas.txt", "sin mes.jpeg"], Directory.GetFiles(descargas).Select(Path.GetFileName).Order());
+
+            // Revisada de nuevo, ya no queda nada para guardar, y lo leído sale de la memoria.
+            b = await Descargas.Revisar(descargas, RaizDelAnio, hoy, null, leer, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.Empty(b.Acomodos);
+            Assert.Equal(3, b.SinUbicar.Count);
+            Assert.Empty(Descargas.Planear(b));
+            Assert.Equal(5, lecturas);
+
+            // La misma foto, bajada otra vez con el mismo nombre: su recibo ya está en Z, así que no se escribe nada, y el
+            // original va a «Acomodados» con otro nombre, sin pisar el que ya estaba.
+            File.WriteAllBytes(Path.Combine(descargas, "foto gomez.jpeg"), [0xFF, 0xD8]);
+            b = await Descargas.Revisar(descargas, RaizDelAnio, hoy, null, leer, memoria, _ => { }, CancellationToken.None, huella);
+            Assert.True(Assert.Single(b.Acomodos).Recibo.EnSuCarpeta);
+            plan = Descargas.Planear(b);
+            Assert.Equal([Accion.Acomodar], plan.Select(e => e.Accion));
+            var antes = File.ReadAllBytes(gomezEnZ);
+            foreach (var e in plan) await Descargas.Escribir(e, b, corregir);
+            Assert.Equal(antes, File.ReadAllBytes(gomezEnZ));
+            Assert.Contains("foto gomez (2).jpeg", Directory.GetFiles(acomodados).Select(Path.GetFileName));
+            Assert.Equal(5, lecturas);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task La_misma_foto_ya_guardada_en_el_cliente_no_se_guarda_otra_vez()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            var perez = Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            // La foto de Rojas ya está en los firmados con su nombre de WhatsApp, y se volvió a bajar con un nombre cualquiera.
+            byte[] foto = [0xFF, 0xD8, 0x01, 0x02];
+            File.WriteAllBytes(Path.Combine(Firmados(perez), "WhatsApp Image 2026-11-18 at 10.00.00.jpeg"), foto);
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            File.WriteAllBytes(Path.Combine(descargas, "WhatsAppDownload.jpeg"), foto);
+            // Y otra foto de Gómez, distinta, que no está en ningún lado.
+            File.WriteAllBytes(Path.Combine(descargas, "gomez.jpeg"), [0xFF, 0xD8, 0x03]);
+            LeerImagen leer = (ruta, _, _) => Task.FromResult(new Lectura(
+                $"CUIL {(ruta.EndsWith("gomez.jpeg") ? Gomez : Rojas).Cuil} PERIODO DE PAGO 10/2026", Ocr: true));
+            var b = await Descargas.Revisar(descargas, _ => clientes, new DateTime(2026, 11, 15), null, leer, new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None);
+            // La de Rojas ya estaba: no se escribe nada, y el original pasa a «Acomodados». La de Gómez se guarda.
+            Assert.Equal([("GOMEZ LUCIA 10 2026.pdf", false), ("ROJAS PABLO 10 2026.pdf", true)], b.Acomodos.Select(a => (a.Recibo.Archivo, a.Recibo.EnSuCarpeta)));
+            Assert.Equal([(Accion.ASuMes, "GOMEZ LUCIA 10 2026.pdf"), (Accion.Acomodar, "WhatsAppDownload.jpeg"), (Accion.Acomodar, "gomez.jpeg")],
+                Descargas.Planear(b).Select(e => (e.Accion, Path.GetFileName(e.Ruta))).OrderBy(t => t.Item1).ThenBy(t => t.Item2, StringComparer.Ordinal));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Un_original_con_una_hoja_sin_ubicar_queda_en_la_carpeta()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            var perez = Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            // Gómez está también en la nómina de otro cliente, que trabaja para los dos.
+            var sosa = OtroCliente(clientes, "SOSA ELENA", Gomez);
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            // Un escaneo de tres hojas: la de Rojas, la de Gómez con el nombre de SOSA ELENA en el encabezado (decide el
+            // cliente), y otra de Gómez sin nombre de cliente (no se sabe de cuál de los dos es).
+            Pdf(Path.Combine(descargas, "escaneo.pdf"), HojasSinTexto(3));
+            var textos = new[] { $"CUIL {Rojas.Cuil} PERIODO DE PAGO 10/2026", $"SOSA ELENA CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026", $"CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026" };
+            LeerImagen leer = (_, hoja, _) => Task.FromResult(new Lectura(textos[hoja - 1], Ocr: true));
+            var b = await Descargas.Revisar(descargas, anio => clientes, new DateTime(2026, 11, 15), null, leer, new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None);
+            Assert.Equal([("PEREZ JUAN", "ROJAS PABLO 10 2026.pdf"), ("SOSA ELENA", "GOMEZ LUCIA 10 2026.pdf")], b.Acomodos.Select(a => (Path.GetFileName(a.Cliente), a.Recibo.Archivo)));
+            Assert.Equal("su CUIL está en la nómina de más de un cliente", Assert.Single(b.SinUbicar).PorQue);
+            // Los dos recibos se guardan; el escaneo no pasa a «Acomodados», porque una hoja suya no tiene adónde ir.
+            var plan = Descargas.Planear(b);
+            Assert.Equal(2, plan.Count(e => e.Accion == Accion.ASuMes));
+            Assert.DoesNotContain(plan, e => e.Accion == Accion.Acomodar);
+            Assert.Empty(b.Completos);
         }
         finally { Directory.Delete(raiz, true); }
     }

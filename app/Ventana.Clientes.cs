@@ -30,7 +30,11 @@ public partial class Ventana
     const string Reloj = "\uE823", Pregunta = "\uE897", Raya = "\uE738", Lapiz = "\uE70F", Disquete = "\uE74E", Portapapeles = "\uE77F";
     const double AltoRenglon = 38;
 
-    bool enClientes, clientesVistos, guardando, planeando, lectorCreado;
+    // Las tres pestañas. Clientes y Descargas comparten la vista ancha (la lista y el panel de la derecha).
+    enum Vista { Separar, Clientes, Descargas }
+    Vista vista;
+    bool enClientes => vista != Vista.Separar; // la vista ancha, con cualquiera de sus dos páginas
+    bool clientesVistos, guardando, planeando;
     FilaCliente? leyendo; // el que se está leyendo por primera vez
     TextBlock? progresoCliente; // en su panel, por dónde va
     string tecleado = ""; // lo que se escribió para saltar a un cliente
@@ -116,8 +120,9 @@ public partial class Ventana
         mesActual = NuevoMes(TextoMes());
         mesMarco.Children.Add(mesActual);
 
-        verSeparar.Click += (_, _) => CambiarVista(false);
-        verClientes.Click += (_, _) => CambiarVista(true);
+        verSeparar.Click += (_, _) => CambiarVista(Vista.Separar);
+        verClientes.Click += (_, _) => CambiarVista(Vista.Clientes);
+        verDescargas.Click += (_, _) => CambiarVista(Vista.Descargas);
         mesAntes.Click += (_, _) => CambiarMes(-1);
         mesDespues.Click += (_, _) => CambiarMes(1);
         // Un solo botón para traer lo nuevo: relee las carpetas y después busca si hay una versión nueva del programa.
@@ -144,21 +149,28 @@ public partial class Ventana
             else await AbrirGuardar();
         };
         guardarNo.Click += (_, _) => CerrarPanel();
-        guardarSi.Click += async (_, _) => await Guardar(plan, deUnCliente: false);
-        guardarCliente.Click += async (_, _) => await Guardar(planCliente, deUnCliente: true);
+        guardarSi.Click += async (_, _) =>
+        {
+            if (panelDeDescargas) await GuardarDescargas(planDescargas, deUnCliente: false);
+            else await Guardar(plan, deUnCliente: false);
+        };
+        guardarCliente.Click += async (_, _) =>
+        {
+            if (panelDeDescargas) await GuardarDescargas(planDescargas, deUnCliente: true);
+            else await Guardar(planCliente, deUnCliente: true);
+        };
         panelCerrar.Click += (_, _) => CerrarPanel();
         // La cruz gira al pasar por encima: dice «cerrar» antes del clic.
         panelCerrar.MouseEnter += (_, _) => Resorte.Animar((panelCerrarGiro, "giro"), 90, v => panelCerrarGiro.Angle = v, rigidez: 300, rebote: 0.2);
         panelCerrar.MouseLeave += (_, _) => Resorte.Animar((panelCerrarGiro, "giro"), 0, v => panelCerrarGiro.Angle = v, rigidez: 300, rebote: 0.2);
         abrirCarpeta.Click += (_, _) =>
         {
-            if (elegida?.Revision is { } r && (r.Firmados ?? r.CarpetaMes) is { } carpeta)
-                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{carpeta}\"") { UseShellExecute = true });
+            if (CarpetaDelPanel() is { } carpeta) Process.Start(new ProcessStartInfo("explorer.exe", $"\"{carpeta}\"") { UseShellExecute = true });
         };
         // La dirección de la misma carpeta, para pegarla en otro programa (en Infocontrol, al subir los recibos).
         copiarCarpeta.Click += async (_, _) =>
         {
-            if (elegida?.Revision is not { } r || (r.Firmados ?? r.CarpetaMes) is not { } carpeta) return;
+            if (CarpetaDelPanel() is not { } carpeta) return;
             for (var intento = 0; intento < 3; intento++)
             {
                 try
@@ -317,11 +329,23 @@ public partial class Ventana
 
     // ---- Las dos vistas ----
 
-    void CambiarVista(bool clientes)
+    void CambiarVista(Vista nueva)
     {
-        if (clientes == enClientes) return;
-        enClientes = clientes;
+        // Mientras se guarda, el panel muestra lo que se está guardando: no se cambia de pestaña.
+        if (nueva == vista || guardando) return;
+        var antes = vista;
+        vista = nueva;
         Pastilla();
+        // Entre Clientes y Descargas cambia solo la página: la ventana, el alto y el panel son los mismos.
+        if (antes != Vista.Separar && nueva != Vista.Separar)
+        {
+            CambiarPagina(nueva == Vista.Descargas);
+            Primera(nueva);
+            return;
+        }
+        var clientes = nueva != Vista.Separar;
+        // La página de la vista ancha entra con ella, sin viaje propio.
+        if (clientes) MostrarPagina(nueva == Vista.Descargas);
         Estirable(clientes);
         FrameworkElement entra = clientes ? vistaClientes : vistaSeparar, sale = clientes ? vistaSeparar : vistaClientes;
         var corridaEntra = clientes ? clientesCorrida : separarCorrida;
@@ -359,12 +383,49 @@ public partial class Ventana
             alLlegar: () => { if (enClientes == clientes) sale.Visibility = Visibility.Collapsed; });
         var arriba = Math.Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - resto - hasta));
         if (Math.Abs(arriba - Top) > 0.5) Resorte.Animar((this, "arriba"), arriba, v => Top = v, desde: Top, rigidez: 170, rebote: 0.08);
+        Primera(nueva);
+    }
 
-        if (clientes && !clientesVistos)
+    // La primera vez que se muestra cada página, se revisa.
+    void Primera(Vista v)
+    {
+        // También si desde Descargas se guardaron recibos nuevos: lo leído sale de la memoria, y lo nuevo trae el CUIL adentro.
+        if (v == Vista.Clientes && (!clientesVistos || clientesViejos))
         {
             clientesVistos = true;
+            clientesViejos = false;
             _ = RevisarClientes(0);
         }
+        if (v == Vista.Descargas && !descargasVistas)
+        {
+            descargasVistas = true;
+            _ = RevisarDescargas();
+        }
+    }
+
+    // La página de la vista ancha que se ve, quieta en su lugar.
+    void MostrarPagina(bool descargas)
+    {
+        paginaClientes.Visibility = descargas ? Visibility.Collapsed : Visibility.Visible;
+        paginaDescargas.Visibility = descargas ? Visibility.Visible : Visibility.Collapsed;
+        Resorte.Animar((paginaClientes, "x"), 0, v => paginaClientesCorrida.X = v, desde: 0);
+        Resorte.Animar((paginaDescargas, "x"), 0, v => paginaDescargasCorrida.X = v, desde: 0);
+    }
+
+    // De Clientes a Descargas la nueva entra por la derecha y empuja a la otra; de vuelta, por la izquierda. El panel de la
+    // derecha es de la que se va: se cierra antes.
+    void CambiarPagina(bool aDescargas)
+    {
+        if (muestra != Muestra.Nada) CerrarPanel(deUna: true);
+        FrameworkElement entra = aDescargas ? paginaDescargas : paginaClientes, sale = aDescargas ? paginaClientes : paginaDescargas;
+        var corridaEntra = aDescargas ? paginaDescargasCorrida : paginaClientesCorrida;
+        var corridaSale = aDescargas ? paginaClientesCorrida : paginaDescargasCorrida;
+        var lado = aDescargas ? 1 : -1;
+        var estaba = entra.Visibility == Visibility.Visible;
+        entra.Visibility = Visibility.Visible;
+        Resorte.Animar((entra, "x"), 0, v => corridaEntra.X = v, desde: estaba ? null : lado * AnchoSeparar, rigidez: 240, rebote: 0.1);
+        Resorte.Animar((sale, "x"), -lado * AnchoSeparar, v => corridaSale.X = v, rigidez: 240, rebote: 0.1,
+            alLlegar: () => { if ((vista == Vista.Descargas) == aDescargas) sale.Visibility = Visibility.Collapsed; });
     }
 
     // El ancho de siempre (la tarjeta de separar y la lista de clientes, 360 más los márgenes) y lo que suma el panel
@@ -423,12 +484,12 @@ public partial class Ventana
     // La pastilla viaja hasta la tarea elegida y toma su ancho.
     void Pastilla()
     {
-        var boton = enClientes ? verClientes : verSeparar;
+        var boton = vista switch { Vista.Clientes => verClientes, Vista.Descargas => verDescargas, _ => verSeparar };
         var x = boton.TranslatePoint(new Point(0, 0), selector).X;
         Resorte.Animar((pastilla, "x"), x, v => pastillaCorrida.X = v, rigidez: 380, rebote: 0.2);
         Resorte.Animar((pastilla, "ancho"), boton.ActualWidth, v => pastilla.Width = Math.Max(0, v), rigidez: 380, rebote: 0.2);
-        verSepararTexto.SetResourceReference(TextBlock.ForegroundProperty, enClientes ? "TextFillColorSecondaryBrush" : "TextFillColorPrimaryBrush");
-        verClientesTexto.SetResourceReference(TextBlock.ForegroundProperty, enClientes ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush");
+        foreach (var (texto, de) in new[] { (verSepararTexto, Vista.Separar), (verClientesTexto, Vista.Clientes), (verDescargasTexto, Vista.Descargas) })
+            texto.SetResourceReference(TextBlock.ForegroundProperty, vista == de ? "TextFillColorPrimaryBrush" : "TextFillColorSecondaryBrush");
     }
 
     // ---- El mes ----
@@ -492,6 +553,15 @@ public partial class Ventana
 
     // ---- La revisión ----
 
+    // El OCR se prepara una vez, lo pida Clientes o Descargas: las dos lo esperan. Si los modelos no se pudieron preparar
+    // (no hay dónde copiarlos), se revisan igual los PDF con texto; las fotos y los escaneos quedan sin leer, y se avisa.
+    Task? lectorListo;
+    Task PrepararLector() => lectorListo ??= Task.Run(() =>
+    {
+        try { if (Lector.Crear() is { } lectores) (lector, lectorAFondo) = lectores; }
+        catch { }
+    });
+
     void EstadoClientes(string texto) => clientesEstado.Text = texto;
 
     async Task RevisarClientes(int lado)
@@ -546,14 +616,7 @@ public partial class Ventana
             if (g != generacionClientes) return;
             (memoria, memoriaDe) = (mem, (mes, anio));
         }
-        if (!lectorCreado)
-        {
-            lectorCreado = true;
-            // Si los modelos del OCR no se pudieron preparar (no hay dónde copiarlos), se revisan igual los PDF con
-            // texto; las fotos y los escaneos quedan sin leer, y al terminar se avisa.
-            try { if (await Task.Run(Lector.Crear) is { } lectores) (lector, lectorAFondo) = lectores; }
-            catch { }
-        }
+        await PrepararLector();
         try
         {
             var clientes = await Task.Run(() => Clientes.ConSueldos(raiz), corte);
@@ -579,7 +642,8 @@ public partial class Ventana
                 if (EsOculto(fila)) continue; // oculto: no se lee
                 EstadoClientes($"{++vistos} de {clientes.Count(c => !ocultos.Contains(Path.GetFileName(c)))} · {fila.Nombre}");
                 leyendo = fila;
-                var rapida = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, null, mem, _ => { }, corte), corte);
+                // Con la huella también acá: a lo leído antes de que existiera se le saca, y las copias se reconocen.
+                var rapida = await Task.Run(() => Clientes.Revisar(ruta, mes, anio, ocr, null, mem, _ => { }, corte, Huella), corte);
                 if (g != generacionClientes) return;
                 leyendo = null;
                 // Sin OCR en esta PC no hay segunda pasada: lo que se pudo revisar es esto.
@@ -718,9 +782,14 @@ public partial class Ventana
 
     // ---- Los renglones ----
 
-    double AnchoCliente => Math.Max(200, clientesDesplazar.ActualWidth - 14); // lugar para la barra de desplazamiento
+    // La lista que se ve, la de Clientes o la de Descargas (la otra está oculta y mide cero), menos el lugar para la barra de
+    // desplazamiento. Con la de Clientes sola, los renglones de Descargas salían de 200.
+    double AnchoCliente => Math.Max(200, Math.Max(clientesDesplazar.ActualWidth, descargasDesplazar.ActualWidth) - 14);
 
-    void AgregarFila(string ruta, int orden)
+    void AgregarFila(string ruta, int orden) => AgregarFila(ruta, orden, deClientes: true);
+
+    // El renglón de un cliente. «deClientes»: el de la pestaña Clientes, con su ojo; si no, el de Descargas, que es igual sin el ojo.
+    FilaCliente AgregarFila(string ruta, int orden, bool deClientes)
     {
         var iconos = (FontFamily)FindResource("Iconos");
         var disco = new Formas.Ellipse { Width = 22, Height = 22 };
@@ -786,7 +855,7 @@ public partial class Ventana
         ojoRaya.SetBinding(Formas.Shape.StrokeProperty, new System.Windows.Data.Binding(nameof(TextBlock.Foreground)) { Source = ojoGlifo });
         var ojoIcono = new Grid { Width = 16, Height = 16, RenderTransformOrigin = new(0.5, 0.5), RenderTransform = ojoEscala, Children = { ojoGlifo, ojoRaya } };
         var ojoBoton = new Button { Style = (Style)FindResource("Icono"), Width = 32, Height = AltoRenglon, HorizontalAlignment = HorizontalAlignment.Left, Content = ojoIcono, IsTabStop = false };
-        var ojoCaja = new Border { Width = viendoOjos ? 32 : 0, ClipToBounds = true, Child = ojoBoton };
+        var ojoCaja = new Border { Width = deClientes && viendoOjos ? 32 : 0, ClipToBounds = true, Child = ojoBoton };
         var renglon = new Grid { Children = { tarjeta, boton } };
         Grid.SetColumn(renglon, 1);
         var corrida = new TranslateTransform();
@@ -802,14 +871,21 @@ public partial class Ventana
             Marca = marca, Detalle = detalle, Chevron = chevron, MarcaEscala = marcaEscala,
             Corrida = corrida, ChevronCorrida = chevronCorrida, Orden = orden, Ruedita = ruedita, RueditaGiro = rueditaGiro
         };
-        boton.Click += (_, _) => Elegir(f);
-        ojoBoton.Click += (_, _) => CambiarOculto(f);
+        boton.Click += (_, _) =>
+        {
+            if (deClientes) Elegir(f);
+            else ElegirDescarga(f);
+        };
         Resorte.Animar((ojoCaja, "ancho"), ojoCaja.Width, v => ojoCaja.Width = Math.Max(0, v), desde: ojoCaja.Width);
-        PintarOjo(f, animar: false);
+        if (deClientes)
+        {
+            ojoBoton.Click += (_, _) => CambiarOculto(f);
+            PintarOjo(f, animar: false);
+        }
         // Al apretar se hunde apenas, y la flecha ya empieza a ir hacia el panel.
         Hundir(boton, 0.985, si =>
         {
-            if (f.Revision is not null) Resorte.Animar((f, "flecha"), si ? 4 : 0, v => chevronCorrida.X = v, rigidez: 420, rebote: 0.3);
+            if (f.Revision is not null || !deClientes) Resorte.Animar((f, "flecha"), si ? 4 : 0, v => chevronCorrida.X = v, rigidez: 420, rebote: 0.3);
         }, objetivo: cabecera);
         // Al pasar por encima se ilumina el fondo, como una fila de Windows 11. Elegido con el teclado (una letra, o Tab),
         // también: el foco de siempre es un rectángulo punteado, que no es de Windows 11.
@@ -828,22 +904,24 @@ public partial class Ventana
             if (!boton.IsMouseOver) Opacidad(fondo, 0);
         };
         // La lista se corre lo justo para mostrarlo, con un resorte: la de WPF salta de golpe.
-        boton.RequestBringIntoView += (_, e) =>
-        {
-            e.Handled = true;
-            Mostrar(f);
-        };
-        clientesFilas.Children.Add(el);
-        porCliente[ruta] = f;
+        if (deClientes)
+            boton.RequestBringIntoView += (_, e) =>
+            {
+                e.Handled = true;
+                Mostrar(f);
+            };
+        (deClientes ? clientesFilas : descargasFilas).Children.Add(el);
+        (deClientes ? porCliente : porDescarga)[ruta] = f;
         // El oculto no está en la lista hasta que se abre el ojo de la barra.
-        if (!SeVe(f))
+        if (deClientes && !SeVe(f))
         {
             el.Opacity = 0;
             el.Visibility = Visibility.Collapsed;
-            return;
+            return f;
         }
         // Si son muchos, entran escalonados los primeros catorce, que son los que se ven.
         Aparecer(el, corrida, desdeY: 10, espera: Math.Min(orden, 14) * 30);
+        return f;
     }
 
     // Los de la revisión anterior se van: se apagan y, al cambiar de mes, se corren hacia el mismo lado que su nombre.
@@ -896,6 +974,7 @@ public partial class Ventana
     // pone en su lugar el de siempre.
     void MostrarLeyendo(FilaCliente f)
     {
+        panelDeDescargas = false;
         // Lo último que se está leyendo de él ya está en la línea de arriba de la lista: se empieza por eso.
         var nombre = Path.GetFileName(f.Ruta);
         var ahora = clientesEstado.Text.StartsWith(nombre + ": ") ? $"Leyendo {clientesEstado.Text[(nombre.Length + 2)..]}" : "Leyendo…";
@@ -911,7 +990,7 @@ public partial class Ventana
     // Saltar a un cliente escribiendo el comienzo de su nombre (ver TextInput en IniciarClientes).
     void Saltar(string texto)
     {
-        if (!enClientes || texto.Length != 1 || !char.IsLetterOrDigit(texto[0]) || porCliente.Count == 0) return;
+        if (vista != Vista.Clientes || texto.Length != 1 || !char.IsLetterOrDigit(texto[0]) || porCliente.Count == 0) return;
         var ahora = DateTime.Now;
         tecleado = ahora - ultimaTecla < TimeSpan.FromSeconds(1) ? tecleado + texto : texto;
         ultimaTecla = ahora;
@@ -1071,6 +1150,7 @@ public partial class Ventana
     // y, abajo, la carpeta.
     void MostrarCliente(FilaCliente f)
     {
+        panelDeDescargas = false;
         var r = f.Revision!;
         var mes = Clientes.NombreMes(r.Mes);
         var seccion = paraGuardar = new StackPanel();
@@ -1269,7 +1349,7 @@ public partial class Ventana
         var resto = suyo.Where(e => !marcas.ContainsKey(e)).ToList();
         if (resto.Count > 0)
         {
-            destino.Children.Add(Seccion("También se guarda"));
+            destino.Children.Add(Seccion("También se guardará"));
             ArmarPlan(r, resto, el => destino.Children.Add(el), (e, marca, texto) => marcas[e] = (marca, texto));
         }
         // En el orden del plan, no en el de la pantalla: la carpeta nueva antes que lo que va adentro, la lista al final.
@@ -1299,8 +1379,8 @@ public partial class Ventana
         if (iconosPlan.TryGetValue(cuil, out var ya)) return ya.Glifo;
         var carpeta = Path.GetFileName(Path.GetDirectoryName(e.Ruta));
         var explica = e.Hojas.Count == 1
-            ? $"Se guarda derecho y con más contraste, en «{carpeta}». Tocalo para ver cómo queda."
-            : $"Sus {e.Hojas.Count} hojas se guardan juntas, derechas y con más contraste, en «{carpeta}». Tocalo para ver cómo quedan.";
+            ? $"Se guardará derecho y con más contraste, en «{carpeta}». Tocalo para ver cómo va a quedar."
+            : $"Sus {e.Hojas.Count} hojas se guardarán juntas, derechas y con más contraste, en «{carpeta}». Tocalo para ver cómo van a quedar.";
         // El de contraste y no una flecha que gira: esa ya es «Revisar de nuevo», al lado del mes.
         var glifo = new TextBlock { Text = "\uE793", FontFamily = (FontFamily)FindResource("Iconos"), FontSize = 13 };
         var boton = new Button
@@ -1308,7 +1388,7 @@ public partial class Ventana
             Style = (Style)FindResource("Icono"), Width = 32, Height = 32, Margin = new(2, -4, 0, 0), VerticalAlignment = VerticalAlignment.Top,
             ToolTip = explica, Content = glifo, RenderTransformOrigin = new(0.5, 0.5),
         };
-        AutomationProperties.SetName(boton, $"Ver cómo se guarda el recibo de {ranura.Nombre}");
+        AutomationProperties.SetName(boton, $"Ver cómo se guardará el recibo de {ranura.Nombre}");
         AutomationProperties.SetHelpText(boton, explica);
         // Entra creciendo al lado del nombre cuando el plan termina de calcularse, como la lupa de las iniciales.
         var escala = new ScaleTransform(0.5, 0.5);
@@ -1319,7 +1399,7 @@ public partial class Ventana
         var viendo = false;
         var nuevo = Path.GetFileName(e.Ruta);
         boton.Click += async (_, _) => await Desplegar(ranura.Despliegue, viendo = !viendo,
-            async () => [Nota(e.Hojas.Count == 1 ? $"Así se guarda, como «{nuevo}»: derecho y con más contraste." : $"Así se guardan, juntas en «{nuevo}»: derechas y con más contraste."), .. await cargar()]);
+            async () => [Nota(e.Hojas.Count == 1 ? $"Así se guardará, como «{nuevo}»: derecho y con más contraste." : $"Así se guardarán, juntas en «{nuevo}»: derechas y con más contraste."), .. await cargar()]);
         // Después del sol, que así sigue alineado con las casillas de las iniciales: un lápiz si cambia el nombre.
         var caja = new StackPanel { Orientation = Orientation.Horizontal, Children = { boton } };
         if (Clientes.NombreCorregido(e) is { } corregido) caja.Children.Add(Lapicito(corregido));
@@ -1378,7 +1458,8 @@ public partial class Ventana
     // «Qué se guardará», agrupado por archivo o carpeta: qué se hace con él, y debajo solo los nombres. Más corto se
     // lee mejor que «NOMBRE 10 2026.pdf: enderezado de «…»» repetido en cada renglón. La carpeta nueva va primero:
     // en ese orden se guarda, y lo de adentro la necesita.
-    void ArmarPlan(Revision r, IReadOnlyList<Escritura> items, Action<UIElement> agregar, Action<Escritura, TextBlock, TextBlock> registrar)
+    // «r»: la revisión del cliente; null en lo de la carpeta de descargas, que no tiene consolidado ni lista.
+    void ArmarPlan(Revision? r, IReadOnlyList<Escritura> items, Action<UIElement> agregar, Action<Escritura, TextBlock, TextBlock> registrar)
     {
         const string Hoja = "\uE8A5";
         void Grupo(string glifo, string titulo, string queHace, IEnumerable<Escritura> cuales, Func<Escritura, string> texto)
@@ -1397,29 +1478,32 @@ public partial class Ventana
         foreach (var e in items.Where(e => e.Accion == Accion.Carpeta))
             Grupo(Carpeta, Path.GetFileName(e.Ruta), "", [e], _ => $"Carpeta nueva, en «{Path.GetFileName(Path.GetDirectoryName(e.Ruta))}»");
         foreach (var g in items.Where(e => e.Accion == Accion.Corregido).GroupBy(DondeVa))
-            Grupo(Carpeta, g.Key, "Enderezamos estos firmados y les subimos el contraste:", g, e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
+            Grupo(Carpeta, g.Key, "Se enderezarán estos firmados y se les subirá el contraste:", g, e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
         // Lo que va a otro mes, con la carpeta de ese mes en el título: «09 SEPTIEMBRE 2026 › RECIBOS FIRMADOS SEPTIEMBRE».
         foreach (var g in items.Where(e => e.Accion == Accion.ASuMes).GroupBy(e => Path.GetDirectoryName(e.Ruta)!, StringComparer.OrdinalIgnoreCase))
-            Grupo(Carpeta, $"{Path.GetFileName(Path.GetDirectoryName(g.Key))} › {Path.GetFileName(g.Key)}", "Llevamos a su mes estos recibos, derechos y con más contraste:", g,
+            Grupo(Carpeta, $"{Path.GetFileName(Path.GetDirectoryName(g.Key))} › {Path.GetFileName(g.Key)}", "Se guardarán acá estos recibos, derechos y con más contraste:", g,
                 e => e.Hojas.Count == 1 ? Quien(e) : $"{Quien(e)} ({e.Hojas.Count} hojas)");
         foreach (var g in items.Where(e => e.Accion == Accion.Iniciales).GroupBy(DondeVa))
-            Grupo(Carpeta, g.Key, "Firmamos con las iniciales del estudio:", g, Quien);
+            Grupo(Carpeta, g.Key, "Se firmarán con las iniciales del estudio:", g, Quien);
         foreach (var e in items.Where(e => e.Accion == Accion.Consolidado))
         {
             // Quiénes están en las hojas que se agregan; si el consolidado ya tiene a alguien, se dice a quiénes se suma.
-            var suman = r.Renglones.Where(x => x.Firmado.Any(h => e.Hojas.Any(o => o.Hoja == h.Hoja && o.Ruta == h.Ruta))).ToList();
+            var suman = r!.Renglones.Where(x => x.Firmado.Any(h => e.Hojas.Any(o => o.Hoja == h.Hoja && o.Ruta == h.Ruta))).ToList();
             var completa = r.Renglones.Any(x => x.Firmado.Any(h => h.Ruta.Equals(e.Ruta, StringComparison.OrdinalIgnoreCase)));
             var hojas = e.Hojas.Count == 1 ? "1 hoja" : $"{e.Hojas.Count} hojas";
-            Grupo(Hoja, Path.GetFileNameWithoutExtension(e.Ruta), completa ? "Le sumamos al final los que le faltaban:" : "Juntamos todos los firmados en un PDF:", [e],
+            Grupo(Hoja, Path.GetFileNameWithoutExtension(e.Ruta), completa ? "Se le sumarán al final los que le faltaban:" : "Se juntarán todos los firmados en un PDF:", [e],
                 _ => completa ? $"{string.Join(", ", suman.Select(x => x.Nombre))} ({hojas})" : $"{(suman.Count == 1 ? "1 recibo" : $"{suman.Count} recibos")} en {hojas}");
         }
         foreach (var e in items.Where(e => e.Accion == Accion.Lista))
             Grupo(Hoja, Path.GetFileNameWithoutExtension(e.Ruta), "", [e], _ => "La lista de los que faltan");
+        // Los originales de la carpeta de descargas que ya tienen todos sus recibos en Z.
+        var acomodar = items.Where(e => e.Accion == Accion.Acomodar).ToList();
+        if (acomodar.Count > 0) Grupo(Carpeta, Descargas.Acomodados, "Pasarán acá los originales, adentro de la carpeta de descargas:", acomodar, e => Path.GetFileName(e.Ruta));
     }
 
     // Cómo va a quedar cada cosa: el firmado ya derecho y con contraste, la zona de la firma con las iniciales, o el
     // texto de la lista. Lo arma el mismo código que después lo guarda.
-    static Func<Task<List<UIElement>>>? ComoQueda(Revision r, Escritura e) => e.Accion switch
+    static Func<Task<List<UIElement>>>? ComoQueda(Revision? r, Escritura e) => e.Accion switch
     {
         Accion.Corregido or Accion.Consolidado or Accion.ASuMes => async () =>
         {
@@ -1430,7 +1514,7 @@ public partial class Ventana
         Accion.Iniciales => async () => [Imagen(await Task.Run(() => RecorteDeLaFirma(e.Hojas[0])), () => AbrirConIniciales(e.Hojas[0]), maxAlto: 220)],
         Accion.Lista => () =>
         {
-            var texto = new TextBlock { Text = Clientes.Lista(r), FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new(0, 4, 0, 4) };
+            var texto = new TextBlock { Text = Clientes.Lista(r!), FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new(0, 4, 0, 4) };
             texto.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
             return Task.FromResult(new List<UIElement> { texto });
         },
@@ -1518,7 +1602,7 @@ public partial class Ventana
         var (glifo, color, nota, explica) = x.Firma switch
         {
             Firma.Firmado => (Tilde, Verde, ConBaja(""), baja is null ? "Firmado: su recibo firmado está con los firmados" : "Se fue en el mes: su liquidación final volvió firmada"),
-            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo. Su recibo se guarda igual, y sigue para revisar hasta que se lea su CUIL"),
+            Firma.PorNombre => (Tilde, Verde, ConBaja("encontrado por el nombre: ilegible, revisar"), "El CUIL no se leía bien y lo encontré por el nombre: revisalo. Su recibo se guardará igual, y seguirá para revisar hasta que se lea su CUIL"),
             Firma.ConIniciales => (Lapiz, Violeta, ConBaja("con las iniciales del estudio"), "No volvió firmado: tiene las iniciales del estudio"),
             _ when FaltaElRecibo(x) => (Cruz, Rojo, ConBaja($"{(baja is null ? "falta el recibo" : "falta la liquidación final")} · CUIL {x.Empleado.Cuil}"),
                 baja is null ? "Falta el recibo: no está ni firmado ni sin firmar" : "Se fue en el mes: su recibo es la liquidación final, y no está ni firmada ni sin firmar"),
@@ -2047,6 +2131,9 @@ public partial class Ventana
         });
     }
 
+    // La carpeta que abre y copia el pie del panel: la del cliente elegido, o la de descargas.
+    string? CarpetaDelPanel() => panelDeDescargas ? carpetaDescargas : elegida?.Revision is { } r ? r.Firmados ?? r.CarpetaMes : null;
+
     // ---- Guardar ----
 
     async Task AbrirGuardar()
@@ -2094,8 +2181,9 @@ public partial class Ventana
         }.Where(s => s.Length > 0);
         var clientes = nuevo.Select(p => p.Fila).Distinct().Count();
         plan = [];
+        panelDeDescargas = false;
         MarcarElegida(null);
-        Llenar(nuevo.Count == 1 ? $"Se guarda 1 cosa en {Donde}" : $"Se guardan {nuevo.Count} cosas en {Donde}",
+        Llenar(nuevo.Count == 1 ? $"Se guardará 1 cosa en {Donde}" : $"Se guardarán {nuevo.Count} cosas en {Donde}",
             $"{(clientes == 1 ? "En 1 cliente" : $"En {clientes} clientes")}: {string.Join(" · ", partes)}.", Disquete, lista =>
             {
                 foreach (var g in nuevo.GroupBy(p => p.Fila))
@@ -2108,6 +2196,7 @@ public partial class Ventana
                 }
             });
         pieGuardar.Visibility = Visibility.Visible;
+        pieGuardarTexto.Text = "No se borra ningún archivo. Lo que ya existe queda como está; al consolidado que le falta alguien solo se le sumarán hojas al final.";
         pieCliente.Visibility = Visibility.Collapsed;
         guardarSi.IsEnabled = guardarNo.IsEnabled = true;
         guardarNo.Content = "Cancelar";

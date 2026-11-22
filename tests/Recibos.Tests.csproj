@@ -10,6 +10,7 @@
     <!-- El motor no usa WinForms: se compila acá directo. -->
     <Compile Include="..\app\Recibos.cs" />
     <Compile Include="..\app\Clientes.cs" />
+    <Compile Include="..\app\Descargas.cs" />
     <Compile Include="..\app\Retoque.cs" />
     <Compile Include="..\app\Actualizador.cs" />
     <Compile Include="..\app\WindowsOcr.cs" />
