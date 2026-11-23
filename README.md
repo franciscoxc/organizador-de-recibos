@@ -219,8 +219,8 @@ círculo la vuelve a mirar.
   muestra sus recibos por mes, cada uno con el nombre con que se guardará y su
   vista previa, derecha y con contraste.
 - Lo que no se sabe de quién es (no se lee el CUIL, no dice el mes, es una
-  constancia de ARCA) aparece en «REVISAR», con su vista previa y el motivo, y
-  queda en la carpeta como está. De un archivo de varias hojas sin ningún recibo
+  constancia de ARCA, una nómina o un listado con varios empleados) aparece en
+  «REVISAR», con su vista previa y el motivo, y queda en la carpeta como está. De un archivo de varias hojas sin ningún recibo
   (un extracto, una factura) dice solo eso: «ningún recibo identificado en 170
   hojas».
 - Una hoja que se leyó bien y no trae ninguna palabra de un recibo de sueldo
@@ -231,9 +231,13 @@ círculo la vuelve a mirar.
   Clientes lo cuenta. Los originales pasan a «Acomodados», una carpeta adentro de
   la de descargas: nada se borra. Un archivo con alguna hoja sin ubicar queda
   donde está.
-- Si un recibo ya está en su carpeta, porque se guardó antes con su nombre o
-  porque el mismo archivo ya estaba ahí con otro nombre, no se guarda otra vez:
-  su original pasa directo a «Acomodados».
+- Si un recibo ya está en su carpeta, porque la app ya guardó esas mismas hojas
+  con su nombre o porque el mismo archivo ya estaba ahí con otro nombre, no se
+  guarda otra vez: su original pasa directo a «Acomodados».
+- Si ya hay un recibo guardado con ese nombre y la hoja bajada no está en él (la
+  segunda hoja de una liquidación, que llegó otro día), la hoja va a «REVISAR»
+  y queda en la carpeta: el recibo guardado no se pisa, y hay que sumarla a
+  mano.
 - La misma foto bajada varias veces se lee una sola vez, y la carpeta se puede
   revisar seguido: lo leído se recuerda.
 

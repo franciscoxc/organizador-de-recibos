@@ -144,8 +144,14 @@ public partial class Ventana
             if (b.PorLeer > 0 && lector is { } leer)
             {
                 var conOcr = Task.Run(() => Descargas.Revisar(carpeta, RaizDelAnio, hoy, ocr, leer, mem, Avisar, corte, Huella), corte);
+                var vistos = mem.Cambios;
                 while (await Task.WhenAny(conOcr, Task.Delay(4000, corte)) != conOcr)
                 {
+                    // Sin nada nuevo leído, la pasada mostraría lo mismo, y abre cada PDF escaneado que espera el OCR (el que
+                    // no terminó de leerse no queda en la memoria): un extracto de 170 hojas se abría cada cuatro segundos.
+                    corte.ThrowIfCancellationRequested(); // con la espera ya cortada, el «continue» giraría sin parar
+                    if (mem.Cambios == vistos) continue;
+                    vistos = mem.Cambios;
                     var parcial = await Task.Run(() => Descargas.Revisar(carpeta, RaizDelAnio, hoy, ocr, null, mem, _ => { }, corte), corte);
                     if (g != generacionDescargas) return;
                     MostrarBandeja(parcial, leyendo: true);

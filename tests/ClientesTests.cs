@@ -636,6 +636,8 @@ public class ClientesTests(ITestOutputHelper salida)
             var e = Clientes.Planear(r, new HashSet<string>()).Single(e => e.Accion == Accion.Consolidado);
             Assert.Equal(consolidado, e.Ruta);
             Assert.Equal(["LOPEZ DIGITAL.pdf", "foto.jpeg"], e.Hojas.Select(h => Path.GetFileName(h.Ruta)));
+            // Un intento anterior se cortó a mitad de escribir y dejó su temporal: no frena a este.
+            File.WriteAllText(consolidado + ".nuevo", "cortado");
             await Clientes.Escribir(e, r, _ => Task.FromResult((Convert.FromBase64String(Jpeg), 2, 2)));
             Assert.False(File.Exists(consolidado + ".nuevo"));
             using (var d = PdfDocument.Open(consolidado))
@@ -1409,7 +1411,8 @@ public class ClientesTests(ITestOutputHelper salida)
 
             // Cada recibo quedó en los firmados de su cliente y su mes, con el CUIL y el período para la revisión de Clientes.
             var gomezEnZ = Path.Combine(Mes(perez), "RECIBOS FIRMADOS OCTUBRE", "GOMEZ LUCIA 10 2026.pdf");
-            using (var doc = PdfDocument.Open(gomezEnZ)) Assert.Equal($"{Gomez.Cuil} 10/2026", doc.Information.Keywords);
+            // Y la marca de la hoja que trae, sin números: no se confunde con un CUIL.
+            using (var doc = PdfDocument.Open(gomezEnZ)) Assert.Matches($"^{Gomez.Cuil} 10/2026 [g-v]{{16}}$", doc.Information.Keywords);
             Assert.True(File.Exists(Path.Combine(Mes(sosa), "RECIBOS FIRMADOS OCTUBRE", "VEGA IRENE 10 2026.pdf")));
             LeerImagen nadieLee = (_, _, _) => throw new InvalidOperationException("no debería leer nada");
             var octubre = await Clientes.Revisar(perez, 10, 2026, null, nadieLee, new Memoria(Path.Combine(raiz, "octubre.json")), _ => { }, CancellationToken.None);
@@ -1492,6 +1495,67 @@ public class ClientesTests(ITestOutputHelper salida)
             Assert.Equal(2, plan.Count(e => e.Accion == Accion.ASuMes));
             Assert.DoesNotContain(plan, e => e.Accion == Accion.Acomodar);
             Assert.Empty(b.Completos);
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task La_hoja_que_llega_despues_de_guardado_el_recibo_va_a_revisar()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            // La liquidación de Gómez tiene dos hojas. Un día llega la primera, y se guarda.
+            File.WriteAllBytes(Path.Combine(descargas, "hoja 1.jpeg"), [0xFF, 0xD8, 0x01]);
+            LeerImagen leer = (_, _, _) => Task.FromResult(new Lectura($"CUIL {Gomez.Cuil} PERIODO DE PAGO 10/2026", Ocr: true));
+            var memoria = new Memoria(Path.Combine(raiz, "m.json"));
+            Task<Bandeja> Revisar() => Descargas.Revisar(descargas, _ => clientes, new DateTime(2026, 11, 15), null, leer, memoria, _ => { }, CancellationToken.None);
+            var b = await Revisar();
+            foreach (var e in Descargas.Planear(b)) await Descargas.Escribir(e, b, _ => Task.FromResult((Convert.FromBase64String(Jpeg), 2, 2)));
+            var enZ = b.Acomodos[0].Recibo.Ruta!;
+            var antes = File.ReadAllBytes(enZ);
+
+            // Otro día llega la segunda, y la primera bajada de nuevo con otro nombre.
+            File.WriteAllBytes(Path.Combine(descargas, "hoja 2.jpeg"), [0xFF, 0xD8, 0x02]);
+            File.WriteAllBytes(Path.Combine(descargas, "otra vez.jpeg"), [0xFF, 0xD8, 0x01]);
+            b = await Revisar();
+            // La repetida ya está en el recibo: pasa a «Acomodados». La segunda no figura en él: queda en la carpeta, a la
+            // vista, en vez de darse por guardada. El recibo de Z no se toca.
+            var ya = Assert.Single(b.Acomodos).Recibo;
+            Assert.True(ya.EnSuCarpeta);
+            Assert.Equal(["otra vez.jpeg"], ya.Hojas.Select(h => Path.GetFileName(h.Ruta)));
+            Assert.Equal(["hoja 2.jpeg: ya hay un «GOMEZ LUCIA 10 2026» guardado, y esta hoja no figura en él"],
+                b.SinUbicar.Select(u => $"{Path.GetFileName(u.Hoja.Ruta)}: {u.PorQue}"));
+            var plan = Descargas.Planear(b);
+            Assert.Equal([(Accion.Acomodar, "otra vez.jpeg")], plan.Select(e => (e.Accion, Path.GetFileName(e.Ruta))));
+            foreach (var e in plan) await Descargas.Escribir(e, b, _ => throw new InvalidOperationException("no debería escribir ningún recibo"));
+            Assert.Equal(antes, File.ReadAllBytes(enZ));
+            Assert.True(File.Exists(Path.Combine(descargas, "hoja 2.jpeg")));
+        }
+        finally { Directory.Delete(raiz, true); }
+    }
+
+    [Fact]
+    public async Task Una_nomina_en_las_descargas_no_es_el_recibo_de_nadie()
+    {
+        var raiz = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var clientes = Directory.CreateDirectory(Path.Combine(raiz, "CLIENTES 2026")).FullName;
+            Cliente(clientes, "PEREZ JUAN", conFirmados: false);
+            var descargas = Directory.CreateDirectory(Path.Combine(raiz, "Descargas")).FullName;
+            // La nómina bajada de AFIP y un listado: los dos traen el período y el CUIL de todos.
+            Pdf(Path.Combine(descargas, "consulta.pdf"), Nomina(Gomez, Rojas, Lopez, Ruiz));
+            Pdf(Path.Combine(descargas, "listado.pdf"), [("PERIODO 10/2026", 40, 800), .. new[] { Gomez, Rojas, Lopez }.Select((e, i) => (e.Cuil, 40.0, 780.0 - i * 12))]);
+            LeerImagen nadieLee = (_, _, _) => throw new InvalidOperationException("no debería leer nada con OCR");
+            var b = await Descargas.Revisar(descargas, _ => clientes, new DateTime(2026, 11, 15), null, nadieLee, new Memoria(Path.Combine(raiz, "m.json")), _ => { }, CancellationToken.None);
+            Assert.Empty(b.Acomodos);
+            Assert.Equal(["consulta.pdf: es una nómina, no un recibo", "listado.pdf: nombra a tres empleados o más: no es un recibo"],
+                b.SinUbicar.Select(u => $"{Path.GetFileName(u.Hoja.Ruta)}: {u.PorQue}"));
+            Assert.Empty(Descargas.Planear(b));
         }
         finally { Directory.Delete(raiz, true); }
     }

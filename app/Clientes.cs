@@ -87,6 +87,10 @@ public sealed class Memoria
 
     readonly string ruta;
     readonly Dictionary<string, Entrada> datos;
+    int cambios;
+
+    /// <summary>Cuántas veces se anotó o se reemplazó una lectura: si no cambió, revisar de nuevo daría lo mismo.</summary>
+    public int Cambios => Volatile.Read(ref cambios);
 
     /// <summary>«anterior» es la memoria de la versión 1.1.0, que era una sola para todos los meses. La primera vez que
     /// se abre un mes se traen de ahí sus lecturas con OCR (las de los archivos que acepta «deEsteMes»), para no leer
@@ -132,7 +136,11 @@ public sealed class Memoria
 
     public void Anotar(FileInfo f, string claves, List<Lectura> hojas)
     {
-        lock (datos) datos[f.FullName] = new(f.Length, f.LastWriteTimeUtc, claves, hojas);
+        lock (datos)
+        {
+            datos[f.FullName] = new(f.Length, f.LastWriteTimeUtc, claves, hojas);
+            cambios++;
+        }
     }
 
     // Una hoja releída a fondo reemplaza a la de la lectura rápida, si el archivo sigue siendo el mismo.
@@ -140,7 +148,10 @@ public sealed class Memoria
     {
         lock (datos)
             if (datos.TryGetValue(f.FullName, out var e) && e.Tamano == f.Length && e.Fecha == f.LastWriteTimeUtc && indice < e.Hojas.Count)
+            {
                 e.Hojas[indice] = hoja;
+                cambios++;
+            }
     }
 
     public void Guardar()

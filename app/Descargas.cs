@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
+using UglyToad.PdfPig;
 
 // La carpeta de descargas: una carpeta de esta PC donde se bajan, como vengan, los recibos firmados de cualquier cliente
 // (fotos de WhatsApp, PDF). La app los lee, encuentra de qué cliente, mes y empleado es cada uno por su CUIL en las nóminas
@@ -86,6 +88,32 @@ public static class Descargas
         return delMes.Any(m => m.Length == f.Length && Suma(m) == Suma(f));
     }
 
+    // La marca de una hoja bajada, que el recibo guardado lleva en sus palabras clave: dice qué hojas trae. Sale de los bytes
+    // del archivo y del número de hoja, así vale aunque el archivo cambie de nombre. En letras de la «g» a la «v»: sin números,
+    // que se leerían pegados a un CUIL, y sin las letras de «iniciales» o «combinado», que Clientes busca en las palabras clave.
+    internal static string Marca(Hallazgo h) => string.Concat(SHA256.HashData(Encoding.UTF8.GetBytes($"{Suma(new FileInfo(h.Ruta))}:{h.Hoja}"))
+        .Take(8).SelectMany(b => new[] { (char)('g' + (b >> 4)), (char)('g' + (b & 15)) }));
+
+    // Las palabras clave de un recibo ya guardado, por ruta, tamaño y fecha: está en la red, y la carpeta se revisa seguido.
+    static readonly ConcurrentDictionary<(string, long, DateTime), string> ClavesLeidas = new();
+    static string Claves(string ruta)
+    {
+        var f = new FileInfo(ruta);
+        return ClavesLeidas.GetOrAdd((f.FullName.ToUpperInvariant(), f.Length, f.LastWriteTimeUtc), _ =>
+        {
+            try
+            {
+                using var d = PdfDocument.Open(f.FullName);
+                return d.Information.Keywords ?? "";
+            }
+            catch { return ""; } // no se pudo abrir: no dice qué hojas trae, y la hoja bajada va a REVISAR
+        });
+    }
+
+    // La página «Ver Nómina» y la consulta de nómina de AFIP, como en Recibos.EsNomina: ningún formato de recibo dice ninguna
+    // de las dos palabras.
+    static bool EsNomina(string texto) => Clientes.Normal(texto) is var n && (n.Contains("NOMINA") || Regex.IsMatch(n, @"\bCONTRIBUYENTE\b"));
+
     // Un PDF que armó la app trae el CUIL en las palabras clave: sus hojas no pasan por el OCR.
     static bool TraeCuil(string texto) => Regex.IsMatch(texto, @"\b\d{2}-?\d{8}-?\d\b");
 
@@ -104,6 +132,9 @@ public static class Descargas
         Memoria memoria, Action<string> avisar, CancellationToken corte, SacarHuella? huella = null)
     {
         var archivos = Archivos(carpeta);
+        // Una vez por año: preguntar por la carpeta de los clientes es mirar en la red si está, y se hacía por cada hoja.
+        var raices = new Dictionary<int, string?>();
+        string? RaizDe(int anio) => raices.TryGetValue(anio, out var ya) ? ya : raices[anio] = raizDelAnio(anio);
         var porLeer = 0;
         var unaVez = huella is null ? null : Clientes.UnaVez(huella, memoria, carpeta, corte);
         var leidos = new Memoria.Entrada?[archivos.Count];
@@ -134,13 +165,20 @@ public static class Descargas
                     sinUbicar.Add(new(h, "es una constancia de ARCA, no un recibo"));
                     continue;
                 }
+                // Una nómina trae el período y el CUIL de todos: sin esto, la que quedó en la carpeta de descargas (la Descargas
+                // de Windows, adonde baja de AFIP) se ofrecía como el recibo firmado de cada empleado.
+                if (EsNomina(texto))
+                {
+                    sinUbicar.Add(new(h, "es una nómina, no un recibo"));
+                    continue;
+                }
                 if (Clientes.MesDelRecibo(texto) is not { } mes)
                 {
                     sinUbicar.Add(new(h, texto.Trim().Length == 0 ? "no se pudo leer" : "no dice de qué mes es"));
                     continue;
                 }
                 var anio = AnioDe(mes, desde);
-                var indice = raizDelAnio(anio) is { } raiz ? await Indice(raiz, mes, anio, ocr, avisar, corte) : [];
+                var indice = RaizDe(anio) is { } raiz ? await Indice(raiz, mes, anio, ocr, avisar, corte) : [];
                 // Solo por el CUIL: entre todos los clientes, un nombre puede estar en más de una nómina.
                 var deQuien = indice.SelectMany(c => Clientes.DeLaNomina(e.Claves + " " + texto, c.Nomina.Empleados.Select(x => x.Cuil))
                     .Select(cuil => (Cliente: c, Empleado: c.Nomina.Empleados.First(x => x.Cuil == cuil)))).ToList();
@@ -151,6 +189,8 @@ public static class Descargas
                 if (indice.Count == 0) sinUbicar.Add(new(h, $"no encontré las carpetas de {mesNombre} {anio} de los clientes"));
                 else if (deQuien.Count == 0) sinUbicar.Add(new(h, $"no encontré su CUIL en las nóminas de {mesNombre}"));
                 else if (deQuien.Select(d => d.Cliente.Cliente).Distinct().Count() > 1) sinUbicar.Add(new(h, "su CUIL está en la nómina de más de un cliente"));
+                // Un escaneo trae a lo sumo dos recibos por hoja. Con más es un resumen o un listado, que también nombra a todos.
+                else if (deQuien.Count >= 3) sinUbicar.Add(new(h, "nombra a tres empleados o más: no es un recibo"));
                 else foreach (var d in deQuien) asignadas.Add((h, d.Cliente.Cliente, d.Cliente.CarpetaMes, d.Cliente.Nomina, d.Empleado, mes, anio));
             }
         }
@@ -159,6 +199,7 @@ public static class Descargas
         // Un PDF por empleado, cliente y mes, con el nombre que le pone la revisión de ese mes (el de sus recibos sin firmar).
         var acomodos = new List<Acomodo>();
         var adonde = new Dictionary<(string, int, int, string), string>(); // (cliente, mes, año, CUIL) → la ruta en Z
+        var acomodados = Archivos(Path.Combine(carpeta, Acomodados));
         foreach (var g in asignadas.GroupBy(a => (a.Cliente, a.Mes, a.Anio)))
         {
             var (cliente, mes, anio) = g.Key;
@@ -170,12 +211,29 @@ public static class Descargas
             {
                 var x = deUno.First().Empleado;
                 var archivo = Recibos.NombreArchivo(Recibos.SinComa(sinFirmar.GetValueOrDefault(x.Cuil)?.Nombre ?? x.Nombre), mes, anio.ToString());
+                var destino = Path.Combine(firmados, archivo);
+                adonde[(cliente, mes, anio, x.Cuil)] = destino;
+                var todas = deUno.Select(a => a.Hoja).ToList();
+                // Ya está en su carpeta si cada archivo bajado ya está ahí tal cual, o si está el PDF con su nombre y trae estas hojas.
+                var yaEsta = todas.Select(h => h.Ruta).Distinct(StringComparer.OrdinalIgnoreCase).All(r => YaEstaEnElMes(r, delMes));
+                if (!yaEsta && File.Exists(destino))
+                {
+                    // El PDF con su nombre no se pisa. Una hoja bajada está en él si lo dicen sus palabras clave (ver Marca), o si
+                    // el mismo archivo ya pasó a «Acomodados» (los que guardó la 1.2.1 no llevan la marca). La que no figura va a
+                    // REVISAR: alcanzaba con el nombre, y la segunda hoja de una liquidación, bajada otro día, se daba por
+                    // guardada y pasaba a «Acomodados» con el recibo de Z incompleto.
+                    // shortcut: la misma imagen repetida en otro archivo con otros bytes se guardó una sola vez y no lleva marca: si
+                    // su original no llegó a «Acomodados», va a REVISAR. Si molesta, anotar también las marcas de las repetidas.
+                    var claves = Claves(destino);
+                    var faltan = todas.Where(h => !claves.Contains(Marca(h)) && !YaEstaEnElMes(h.Ruta, acomodados)).ToList();
+                    sinUbicar.AddRange(faltan.Select(h => new SinUbicar(h, $"ya hay un «{Path.GetFileNameWithoutExtension(archivo)}» guardado, y esta hoja no figura en él")));
+                    todas = todas.Except(faltan).ToList();
+                    if (todas.Count == 0) continue;
+                    yaEsta = true;
+                }
                 // La misma imagen repetida va una sola vez (ver Clientes.Planear, que tiene el mismo límite).
-                var suyas = deUno.Select(a => a.Hoja).DistinctBy(h => h.Lectura.Huella ?? $"{h.Ruta}|{h.Hoja}").ToList();
-                // Ya está en su carpeta si está el PDF con su nombre (lo guardó la app), o si cada archivo bajado ya está ahí tal cual.
-                var yaEsta = File.Exists(Path.Combine(firmados, archivo)) || deUno.Select(a => a.Hoja.Ruta).Distinct(StringComparer.OrdinalIgnoreCase).All(r => YaEstaEnElMes(r, delMes));
+                var suyas = todas.DistinctBy(h => h.Lectura.Huella ?? $"{h.Ruta}|{h.Hoja}").ToList();
                 acomodos.Add(new(cliente, new ASuMes(x, mes, anio, archivo, firmados, suyas, false, yaEsta)));
-                adonde[(cliente, mes, anio, x.Cuil)] = Path.Combine(firmados, archivo);
             }
         }
         // Los archivos con todas sus hojas ubicadas, y adónde van. Se cuenta antes de sacar las imágenes repetidas: un PDF que
@@ -308,7 +366,8 @@ public static class Descargas
             case Accion.ASuMes:
                 var l = b.Acomodos.First(a => string.Equals(a.Recibo.Ruta, e.Ruta, StringComparison.OrdinalIgnoreCase)).Recibo;
                 if (!Directory.Exists(l.Carpeta)) throw new IOException($"no está la carpeta {Path.GetFileName(l.Carpeta)}");
-                await Clientes.EscribirCorregido(e.Ruta, $"{l.Empleado.Cuil} {l.Mes:00}/{l.Anio}", e.Hojas, corregir);
+                // Con la marca de cada hoja: así se sabe después si una hoja bajada ya está en este recibo.
+                await Clientes.EscribirCorregido(e.Ruta, $"{l.Empleado.Cuil} {l.Mes:00}/{l.Anio}" + string.Concat(e.Hojas.Select(h => " " + Marca(h))), e.Hojas, corregir);
                 return;
             case Accion.Acomodar:
                 // Se mira de nuevo: si un recibo suyo no se pudo guardar, el original no se mueve.

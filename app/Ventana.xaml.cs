@@ -16,7 +16,7 @@ public partial class Ventana : Window
     // El verde y el rojo de las marcas y del letrero son fijos y llevan blanco encima: los del tema oscuro
     // (verde claro, rosa) no se leen con letra blanca.
     static readonly SolidColorBrush Verde = new(Color.FromRgb(0x10, 0x7C, 0x10)), Rojo = new(Color.FromRgb(0xC4, 0x2B, 0x1C));
-    const string Flecha = "", Tilde = "", Cruz = "", Alerta = "", Carpeta = "";
+    const string Tilde = "", Cruz = "", Alerta = "", Carpeta = "";
 
     readonly string[] startupFiles;
     readonly Ocr? ocr = CrearOcr();

@@ -606,7 +606,9 @@ public static class Recibos
             return;
         }
         var aparte = ruta + ".nuevo";
-        await GuardarNuevo(aparte, pdf);
+        // Pisando el que haya: es el temporal de la app, no un archivo del cliente. Con GuardarNuevo, el «.nuevo» que dejaba
+        // un corte de red o un apagón a mitad de escribir hacía fallar cada intento siguiente con «el archivo ya existe».
+        await File.WriteAllBytesAsync(aparte, pdf);
         try { File.Move(aparte, ruta, overwrite: true); }
         catch
         {

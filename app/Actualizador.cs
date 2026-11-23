@@ -11,7 +11,6 @@ public record VersionNueva(Version Version, string Url, string Sha256, long Tama
 public static class Actualizador
 {
     const string Api = "https://api.github.com/repos/franciscoxc/organizador-de-recibos/releases/latest";
-    public const string Pagina = "https://github.com/franciscoxc/organizador-de-recibos/releases/latest";
 
     // La pone el workflow desde el tag (v1.0.3 -> 1.0.3); una compilación local queda en 0.0.0.
     public static Version Actual { get; } = Normalizar(typeof(Actualizador).Assembly.GetName().Version ?? new Version());
